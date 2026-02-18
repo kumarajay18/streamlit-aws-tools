@@ -139,24 +139,7 @@ session_box = st.container()
 with session_box:
     if mgr.has_active_session():
         ctx = mgr.current_context()
-        
-        st.markdown(
-            f"""
-            <div style="
-                padding: 20px;
-                border-radius: 10px;
-                background-color: #f8f9fa;
-                border: 1px solid #ddd;">
-                <h4>Active AWS Session</h4>
-                <p><b>Profile:</b> {ctx['profile']}</p>
-                <p><b>Region:</b> {ctx['region']}</p>
-                <p><b>S3 Endpoint:</b> {ctx['s3_endpoint_url'] or '(standard)'}</p>
-                <p><b>Account:</b> {ctx['identity']['Account']}</p>
-                <p><b>ARN:</b> {ctx['identity']['Arn']}</p>
-            </div>
-            """,
-            unsafe_allow_html=False
-        )
+        st.info("Session Ready")
     else:
         st.info("You are not logged in yet. Please authenticate using the left panel.")
 
