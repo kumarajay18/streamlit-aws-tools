@@ -33,11 +33,6 @@ default_region = "ap-southeast-2"
 # Helpers
 # -----------------------------
 def normalize_appid(appid: str) -> Tuple[str, str]:
-    """
-    Returns (needle_full, needle_numeric)
-    - needle_full: 'a1401'  (lower-cased AppId)
-    - needle_numeric: '1401' (digits extracted)
-    """
     a = (appid or "").strip()
     if not a:
         raise ValueError("Please provide a non-empty AppId, e.g., A1401.")
@@ -47,10 +42,6 @@ def normalize_appid(appid: str) -> Tuple[str, str]:
 
 
 def list_buckets_matching(s3_client, appid: str) -> List[Dict]:
-    """
-    S3 ListBuckets is account-global. We filter by substring 'appid' (lower-cased) in bucket names.
-    Returns a list of dicts: {Bucket, CreationDate}
-    """
     try:
         resp = s3_client.list_buckets()
     except ClientError as e:
@@ -74,10 +65,6 @@ def list_buckets_matching(s3_client, appid: str) -> List[Dict]:
 
 
 def list_lambda_functions_matching(lambda_client, appid: str) -> List[Dict]:
-    """
-    Paginates ListFunctions and filters by substring against 'a1401' and '1401'.
-    Returns: [{FunctionName, Runtime, LastModified, Arn}]
-    """
     n_full, n_digits = normalize_appid(appid)
     needles = set([n_full, n_digits]) if n_digits else set([n_full])
 
@@ -111,10 +98,6 @@ def list_lambda_functions_matching(lambda_client, appid: str) -> List[Dict]:
 
 
 def get_lambda_env(lambda_client, function_name: str) -> Dict:
-    """
-    Returns env variables (dict) for a lambda function.
-    If KMS is used and the role cannot decrypt, AWS may return empty or AccessDenied.
-    """
     try:
         conf = lambda_client.get_function_configuration(FunctionName=function_name)
         env = conf.get("Environment", {}).get("Variables", {}) or {}
@@ -132,7 +115,6 @@ def get_lambda_env(lambda_client, function_name: str) -> Dict:
 
 
 def console_link_s3_bucket(bucket: str, region: str) -> str:
-    # S3 console is global but supports ?region parameter
     return f"https://s3.console.aws.amazon.com/s3/buckets/{bucket}?region={region}&tab=objects"
 
 
@@ -141,20 +123,11 @@ def console_link_lambda(fn_name: str, region: str) -> str:
 
 
 def extract_request_id_from_tail(log_tail: str) -> Optional[str]:
-    """
-    Lambda LogType='Tail' often contains lines like:
-      START RequestId: 4c3c4f1a-... Version: $LATEST
-      END   RequestId: 4c3c4f1a-...
-      REPORT RequestId: 4c3c4f1a-...
-    We try to extract the RequestId.
-    """
     if not log_tail:
         return None
-    # REPORT line (most reliable)
     m = re.search(r"REPORT\s+RequestId:\s*([0-9a-fA-F-]{10,})", log_tail)
     if m:
         return m.group(1)
-    # Any RequestId mention
     m = re.search(r"RequestId:\s*([0-9a-fA-F-]{10,})", log_tail)
     if m:
         return m.group(1)
@@ -163,11 +136,6 @@ def extract_request_id_from_tail(log_tail: str) -> Optional[str]:
 
 def fetch_cloudwatch_logs_for_invocation(session, region: str, function_name: str, request_id: Optional[str],
                                          start_time: datetime, end_time: datetime) -> List[str]:
-    """
-    Fetch CloudWatch Logs for the given Lambda invocation window. If request_id is provided,
-    we filter by it; otherwise we fetch the window.
-    Returns a list of message strings (ISO-timestamp prefixed) sorted by timestamp.
-    """
     logs_client = session.client("logs", region_name=region)
     log_group = f"/aws/lambda/{function_name}"
 
@@ -179,7 +147,6 @@ def fetch_cloudwatch_logs_for_invocation(session, region: str, function_name: st
         "limit": 10000,
     }
     if request_id:
-        # Use a filter pattern that matches the specific RequestId
         params["filterPattern"] = f'"{request_id}"'
 
     lines: List[str] = []
@@ -188,7 +155,7 @@ def fetch_cloudwatch_logs_for_invocation(session, region: str, function_name: st
         while True:
             if next_token:
                 params["nextToken"] = next_token
-            resp = logs_client.filter_log_events(**params)
+            resp = session.client("logs", region_name=region).filter_log_events(**params)
             events = resp.get("events", [])
             for e in events:
                 ts = e.get("timestamp")
@@ -216,9 +183,6 @@ def fetch_cloudwatch_logs_for_invocation(session, region: str, function_name: st
 
 def fetch_logs_with_retry(session, region: str, function_name: str, request_id: Optional[str],
                           start_time: datetime, attempts: int = 5, delay_sec: float = 2.0) -> List[str]:
-    """
-    Poll CloudWatch logs for a short period, waiting for ingestion.
-    """
     out: List[str] = []
     for i in range(1, attempts + 1):
         st.info(f"⏳ Waiting for CloudWatch logs (attempt {i}/{attempts}) ...")
@@ -231,10 +195,8 @@ def fetch_logs_with_retry(session, region: str, function_name: str, request_id: 
             start_time=start_time,
             end_time=end_time,
         )
-        # If we filtered by RequestId and found at least one line containing it, consider success.
         if out and (not request_id or any(request_id in line for line in out)):
             break
-        # Sleep between attempts
         if i < attempts:
             import time as _time
             _time.sleep(delay_sec)
@@ -242,34 +204,24 @@ def fetch_logs_with_retry(session, region: str, function_name: str, request_id: 
 
 
 def render_payload_response(body_stream) -> None:
-    """
-    Safely render the Lambda response payload. Only shows JSON view if valid JSON;
-    otherwise shows plain text. Never raises Streamlit's JSON parse error.
-    """
     if body_stream is None:
         st.info("Function returned no payload.")
         return
-
     raw = body_stream.read()
     if not raw:
         st.info("Function returned an empty payload.")
         return
-
-    # Try JSON decode first
     try:
         text = raw.decode("utf-8", errors="replace")
         parsed = json.loads(text)
         with st.expander("📦 Response (JSON)"):
             st.json(parsed)
-        return
     except Exception:
-        # Fall back to text (no JSON parse error UI)
         with st.expander("📦 Response (text)"):
             try:
                 st.code(raw.decode("utf-8", errors="replace"))
             except Exception:
                 st.code(str(raw))
-
 
 # -----------------------------
 # Inputs (Sidebar)
@@ -312,17 +264,15 @@ if btn_s3:
             except Exception as e:
                 st.error(str(e))
 
-# Render S3 results if present
 if "app_discovery_s3_df" in st.session_state:
     st.markdown("### 🪣 Buckets")
     df = st.session_state["app_discovery_s3_df"]
     st.dataframe(df, use_container_width=True, hide_index=True)
-    # Quick console links (first 25)
     region = lambda_region or default_region
     with st.expander("Open in AWS Console (first 25)"):
         for b in df["Bucket"].tolist()[:25]:
             url = console_link_s3_bucket(b, region)
-            st.markdown(f"- [{b}]({url})")
+            st.markdown(f"- {url}")
 
 st.markdown("---")
 
@@ -335,7 +285,7 @@ if btn_lambda:
     else:
         with st.status(f"Searching Lambda functions in **{lambda_region}** for **{appid}** ...", expanded=True) as status:
             try:
-                lam = mgr.get_session().client("lambda", region_name=lambda_region)  # region-specific
+                lam = mgr.get_session().client("lambda", region_name=lambda_region)
                 functions = list_lambda_functions_matching(lam, appid)
                 if not functions:
                     st.info("No Lambda functions matched.")
@@ -348,24 +298,23 @@ if btn_lambda:
             except Exception as e:
                 st.error(str(e))
 
-# Render Lambda results if present
+# -----------------------------
+# Render Lambda block
+# -----------------------------
 fn_name: Optional[str] = None
 if "app_discovery_lambda_df" in st.session_state:
     st.markdown("### 🪄 Lambda Functions")
     df = st.session_state["app_discovery_lambda_df"]
 
-    # Two-column: table + selection
     c_left, c_right = st.columns([1.8, 1.2])
     with c_left:
         st.dataframe(df, use_container_width=True, hide_index=True)
     with c_right:
         names = df["FunctionName"].tolist()
         fn_name = st.selectbox("Select a function", names, index=0 if names else None)
-
-        # Console link
         if fn_name:
             url = console_link_lambda(fn_name, lambda_region)
-            st.markdown(f"[Open in AWS Console ↗]({url})")
+            st.markdown(f"{url}")
 
     # -----------------------------
     # Test Lambda — only for LambdaEtlBatch
@@ -377,8 +326,6 @@ if "app_discovery_lambda_df" in st.session_state:
             "Visible because the selected function name contains **LambdaEtlBatch**. "
             "Sends a JSON event to the function (or DryRun) and fetches **full CloudWatch logs** for this run."
         )
-
-        # Default test event (remember last input in session)
         default_event_text = st.session_state.get(
             "app_discovery_lambda_test_event",
             "{\n  \"action\": \"test\",\n  \"source\": \"AppDiscovery\"\n}"
@@ -393,21 +340,16 @@ if "app_discovery_lambda_df" in st.session_state:
 
         col_test_left, col_test_right = st.columns([1, 1])
         with col_test_left:
-            dry_run = st.checkbox("Dry run (permission check only)", value=False,
-                                  help="DryRun validates permissions without executing the function.")
+            dry_run = st.checkbox("Dry run (permission check only)", value=False)
         with col_test_right:
             btn_invoke = st.button("🚀 Invoke test", type="primary", use_container_width=True, disabled=not bool(fn_name))
 
-        # Provide a refresh button for the most recent invocation
         refresh_label = "🔄 Fetch logs again for last invocation"
-        refresh_key = "app_discovery_refresh_logs_btn"
-        do_refresh = st.button(refresh_label, key=refresh_key)
+        do_refresh = st.button(refresh_label, key="app_discovery_refresh_logs_btn")
 
-        # Pull last invocation metadata from session (if available)
         last_inv = st.session_state.get("app_discovery_last_invocation")
 
         if btn_invoke and fn_name:
-            # Parse JSON safely
             try:
                 payload_obj = json.loads(event_text) if event_text.strip() else {}
             except json.JSONDecodeError as je:
@@ -415,8 +357,6 @@ if "app_discovery_lambda_df" in st.session_state:
             else:
                 session = mgr.get_session()
                 lam = session.client("lambda", region_name=lambda_region)
-
-                # Time window for log retrieval (±2 minutes around now)
                 window_pad = timedelta(minutes=2)
                 start_time = datetime.now(timezone.utc) - window_pad
 
@@ -424,32 +364,24 @@ if "app_discovery_lambda_df" in st.session_state:
                     request_id = None
                     try:
                         if dry_run:
-                            resp = lam.invoke(
-                                FunctionName=fn_name,
-                                InvocationType="DryRun",
-                            )
+                            resp = lam.invoke(FunctionName=fn_name, InvocationType="DryRun")
                             st.success("DryRun succeeded (lambda:InvokeFunction is allowed).")
                             st.json({
                                 "StatusCode": resp.get("StatusCode"),
                                 "ExecutedVersion": resp.get("ExecutedVersion"),
                             })
-                            # No logs for DryRun
                         else:
                             resp = lam.invoke(
                                 FunctionName=fn_name,
                                 InvocationType="RequestResponse",
-                                LogType="Tail",  # returns base64-encoded last 4KB of logs
+                                LogType="Tail",
                                 Payload=json.dumps(payload_obj).encode("utf-8"),
                             )
-
-                            # High-level outcome
                             st.write("**Result**")
                             st.json({
                                 "StatusCode": resp.get("StatusCode"),
                                 "ExecutedVersion": resp.get("ExecutedVersion"),
                             })
-
-                            # Logs (tail) — also extract RequestId to query full logs
                             log_b64 = resp.get("LogResult")
                             log_tail = ""
                             if log_b64:
@@ -459,14 +391,10 @@ if "app_discovery_lambda_df" in st.session_state:
                                         st.code(log_tail, language="text")
                                 except Exception:
                                     st.warning("Could not decode LogResult.")
-
                             request_id = extract_request_id_from_tail(log_tail)
-
-                            # Payload (response body) — robust renderer (no JSON parse error)
                             body = resp.get("Payload")
                             render_payload_response(body)
 
-                        # Save invocation context for refresh button
                         st.session_state["app_discovery_last_invocation"] = {
                             "fn_name": fn_name,
                             "region": lambda_region,
@@ -475,7 +403,6 @@ if "app_discovery_lambda_df" in st.session_state:
                             "is_dry_run": bool(dry_run),
                         }
 
-                        # For non-dry-run, try to fetch logs with retries
                         if not dry_run:
                             st.markdown("#### 🔎 CloudWatch logs for this invocation")
                             logs_lines = fetch_logs_with_retry(
@@ -484,8 +411,8 @@ if "app_discovery_lambda_df" in st.session_state:
                                 function_name=fn_name,
                                 request_id=request_id,
                                 start_time=start_time,
-                                attempts=5,          # configurable
-                                delay_sec=2.0,       # configurable
+                                attempts=5,
+                                delay_sec=2.0,
                             )
                             if logs_lines:
                                 with st.expander("📜 CloudWatch Logs (full)"):
@@ -509,7 +436,6 @@ if "app_discovery_lambda_df" in st.session_state:
                     except Exception as e:
                         st.error(f"Unexpected error: {e}")
 
-        # Manual refresh (uses stored RequestId to avoid old logs)
         if do_refresh:
             inv = st.session_state.get("app_discovery_last_invocation")
             if not inv:
@@ -522,21 +448,18 @@ if "app_discovery_lambda_df" in st.session_state:
                         st.warning("The selected function/region changed since last run. Please invoke again.")
                     else:
                         session = mgr.get_session()
-                        # Use the original window start; extend end to now + 2m
-                        start_iso = inv.get("start_time")
                         try:
-                            start_time = datetime.fromisoformat(start_iso)
+                            start_time = datetime.fromisoformat(inv["start_time"])
                             if start_time.tzinfo is None:
                                 start_time = start_time.replace(tzinfo=timezone.utc)
                         except Exception:
                             start_time = datetime.now(timezone.utc) - timedelta(minutes=5)
-
                         st.markdown("#### 🔁 Refreshing CloudWatch logs for last invocation")
                         logs_lines = fetch_logs_with_retry(
                             session=session,
                             region=inv.get("region"),
                             function_name=inv.get("fn_name"),
-                            request_id=inv.get("request_id"),  # filter by exact RequestId
+                            request_id=inv.get("request_id"),
                             start_time=start_time,
                             attempts=5,
                             delay_sec=2.0,
@@ -545,24 +468,46 @@ if "app_discovery_lambda_df" in st.session_state:
                             with st.expander("📜 CloudWatch Logs (full) — refreshed"):
                                 st.code("\n".join(logs_lines), language="text")
                         else:
-                            st.info("Still no log events found. If the function writes no logs or logging is disabled, this is expected.")
+                            st.info("Still no log events found.")
 
-    else:
-        st.caption("Select a Lambda containing **LambdaEtlBatch** to enable the test panel.")
+    # -----------------------------
+    # Modify NOS Table — only for LambdaRawToCurated
+    # -----------------------------
+    is_raw_to_curated = bool(fn_name and ("lambdarawtocurated" in fn_name.lower()))
+    if is_raw_to_curated:
+        st.markdown("### 🛠️ Modify NOS Table")
+        st.caption("Enabled because this Lambda contains **LambdaRawToCurated**.")
+        if st.button("Modify NOS Table", type="primary", use_container_width=True):
+            # Fetch PIPELINE_ID from Lambda env variables then navigate
+            try:
+                lam = mgr.get_session().client("lambda", region_name=lambda_region)
+                env = get_lambda_env(lam, fn_name)
+                pipeline_id = env.get("PIPELINE_ID") or env.get("PipelineId")
+                if not pipeline_id:
+                    st.error("PIPELINE_ID not found in Lambda environment variables.")
+                else:
+                    st.session_state["nos_pipeline_id"] = pipeline_id
+                    st.session_state["nos_dynamo_region"] = lambda_region
+                    try:
+                        st.switch_page("pages/9_Modify_NOS_Table.py")
+                    except Exception:
+                        st.success("Pipeline ID captured. Navigate to the new page from the sidebar if not auto-routed.")
+                        st.write("**Target page:** `Modify NOS Table`")
+            except Exception as e:
+                st.error(f"Failed to read Lambda env vars: {e}")
 
 # -----------------------------
-# Show env vars (TABLE view)
+# Show env vars
 # -----------------------------
 if 'fn_name' in locals() and fn_name:
     if st.button("🔐 Show environment variables", type="primary", use_container_width=True):
         lam = mgr.get_session().client("lambda", region_name=lambda_region)
         with st.status(f"Reading environment variables for **{fn_name}** ...", expanded=True) as status:
             try:
-                env = get_lambda_env(lam, fn_name)  # dict[str, str]
+                env = get_lambda_env(lam, fn_name)
                 if not env:
                     st.warning("No environment variables found (or access restricted).")
                 else:
-                    # Convert to a neat table
                     df_env = (
                         pd.DataFrame(
                             [{"Key": k, "Value": v if v is not None else ""} for k, v in env.items()]
@@ -570,15 +515,8 @@ if 'fn_name' in locals() and fn_name:
                         .sort_values("Key")
                         .reset_index(drop=True)
                     )
-
                     st.markdown("#### 🔐 Environment variables")
-                    st.dataframe(
-                        df_env,
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-                    # Offer a CSV download
+                    st.dataframe(df_env, use_container_width=True, hide_index=True)
                     csv_bytes = df_env.to_csv(index=False).encode("utf-8")
                     st.download_button(
                         label="⬇️ Download as CSV",
@@ -587,7 +525,6 @@ if 'fn_name' in locals() and fn_name:
                         mime="text/csv",
                         use_container_width=True,
                     )
-
                 status.update(label="Done", state="complete", expanded=False)
             except Exception as e:
                 st.error(str(e))
