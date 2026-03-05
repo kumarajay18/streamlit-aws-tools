@@ -24,40 +24,7 @@ DEFAULT_SOURCETYPE = "kube:container:td-consumption"
 st.set_page_config(page_title="ETL Trace Explorer", layout="wide")
 st.title("ETL Trace Explorer")
 
-
-# --------------------------------
-# SIDEBAR
-# --------------------------------
-with st.sidebar:
-    app_id = st.text_input("Enterprise App ID (e.g., a1115)", "")
-    batch_id = st.text_input("Batch ID (optional, e.g., 427)", "")
-
-    preset = st.radio(
-        "Time Range",
-        ["Last 1 hour", "Last 24 hours", "Last 3 days", "Last 7 days", "Custom"],
-        index=1
-    )
-
-    now = datetime.now(timezone.utc)
-    if preset == "Last 1 hour":
-        earliest, latest = "-1h", "now"
-    elif preset == "Last 24 hours":
-        earliest, latest = "-24h", "now"
-    elif preset == "Last 3 days":
-        earliest, latest = "-3d", "now"
-    elif preset == "Last 7 days":
-        earliest, latest = "-7d", "now"
-    else:
-        start = st.date_input("Start", now.date())
-        end = st.date_input("End", now.date())
-        earliest = datetime.combine(start, datetime.min.time()).isoformat()
-        latest = datetime.combine(end, datetime.max.time()).isoformat()
-
-    index = st.text_input("Index", DEFAULT_INDEX)
-    sourcetype = st.text_input("Sourcetype", DEFAULT_SOURCETYPE)
-
-    debug = st.checkbox("Show Debug (SPL + SID + raw results)", value=False)
-    run = st.button("Run Search")
+MAX_TRACES_ALL = 200  # safety cap for "All traces" query size
 
 
 # --------------------------------
@@ -73,6 +40,7 @@ def connect():
             autologin=True
         )
     except TypeError:
+        # older splunklib versions
         return splunk_client.connect(
             host=SPLUNK_HOST,
             port=SPLUNK_PORT,
@@ -84,11 +52,10 @@ def connect():
 
 # --------------------------------
 # SPL: DISCOVER TRACE IDS
-# spath auto-extracts JSON fields from _raw in auto mode. [1](https://docs.splunk.com/Documentation/Splunk/9.4.2/SearchReference/Spath)
+# batch_id filter ONLY here
 # --------------------------------
 def discovery_query(index, sourcetype, app_id, batch_id):
     spl = f'''search index={index} sourcetype="{sourcetype}" "{app_id}"'''
-    # ✅ batch_id filter ONLY here
     if batch_id.strip():
         spl += f''' "'batch_id': {batch_id.strip()}"'''
 
@@ -96,6 +63,7 @@ def discovery_query(index, sourcetype, app_id, batch_id):
 | spath
 | eval trace=lower(trim('dd.trace_id'))
 | where isnotnull(trace) AND trace!=""
+
 | stats values(trace) as traces
 | mvexpand traces
 | eval trace=traces
@@ -108,13 +76,12 @@ def discovery_query(index, sourcetype, app_id, batch_id):
 
 # --------------------------------
 # SPL: FETCH LOGS FOR TRACE IDS
-# (NO batch_id filter here, as requested)
+# (NO batch_id filter here)
 # --------------------------------
 def logs_query(index, sourcetype, trace_ids):
     quoted = ",".join([f'"{t}"' for t in trace_ids])
 
     spl = f'''search index={index} sourcetype="{sourcetype}"'''
-
     spl += f'''
 | spath
 | eval trace=lower(trim('dd.trace_id'))
@@ -131,7 +98,7 @@ def logs_query(index, sourcetype, trace_ids):
 
 
 # --------------------------------
-# RUN SPL (json_rows is easiest to parse safely)
+# RUN SPL (json_rows easiest to parse)
 # --------------------------------
 def run_query(service, spl, earliest, latest, debug=False, label=""):
     if debug:
@@ -207,16 +174,55 @@ def normalize_rows(rows):
 
 
 # --------------------------------
-# MAIN
+# SIDEBAR (FORM - fixes rerun blanking)
 # --------------------------------
-if run:
+with st.sidebar:
+    with st.form("splunk_form", clear_on_submit=False):
+        app_id = st.text_input("Enterprise App ID (e.g., a1115)", "", key="app_id")
+        batch_id = st.text_input("Batch ID (optional, e.g., 427)", "", key="batch_id")
+
+        preset = st.radio(
+            "Time Range",
+            ["Last 1 hour", "Last 24 hours", "Last 3 days", "Last 7 days", "Custom"],
+            index=1,
+            key="preset"
+        )
+
+        now = datetime.now(timezone.utc)
+        if preset == "Last 1 hour":
+            earliest, latest = "-1h", "now"
+        elif preset == "Last 24 hours":
+            earliest, latest = "-24h", "now"
+        elif preset == "Last 3 days":
+            earliest, latest = "-3d", "now"
+        elif preset == "Last 7 days":
+            earliest, latest = "-7d", "now"
+        else:
+            start = st.date_input("Start", now.date(), key="start_date")
+            end = st.date_input("End", now.date(), key="end_date")
+            earliest = datetime.combine(start, datetime.min.time()).isoformat()
+            latest = datetime.combine(end, datetime.max.time()).isoformat()
+
+        index = st.text_input("Index", DEFAULT_INDEX, key="index")
+        sourcetype = st.text_input("Sourcetype", DEFAULT_SOURCETYPE, key="sourcetype")
+
+        debug = st.checkbox("Show Debug (SPL + SID + raw results)", value=False, key="debug")
+
+        submitted = st.form_submit_button("Run Search")
+
+
+# --------------------------------
+# MAIN FLOW
+# --------------------------------
+
+# 1) Discover trace ids ONLY when submitted
+if submitted:
     if not app_id.strip():
         st.warning("App ID required")
         st.stop()
 
     svc = connect()
 
-    # 1) Discover trace ids (batch_id only here)
     spl1 = discovery_query(index, sourcetype, app_id.strip(), batch_id)
     traces_rows = run_query(svc, spl1, earliest, latest, debug=debug, label="Discover trace IDs")
 
@@ -225,31 +231,73 @@ if run:
 
     if not trace_ids:
         st.error("No trace IDs found. Try widening time range or confirm app_id/batch_id filters.")
+        st.session_state.pop("trace_ids", None)
+        st.session_state.pop("logs_df", None)
         st.stop()
+
+    # ✅ persist trace IDs + search context for reruns
+    st.session_state["trace_ids"] = trace_ids
+    st.session_state["search_ctx"] = {
+        "earliest": earliest,
+        "latest": latest,
+        "index": index,
+        "sourcetype": sourcetype,
+        "debug": debug,
+    }
+
+    # When a new search is submitted, clear old logs
+    st.session_state.pop("logs_df", None)
 
     st.success(f"Found {len(trace_ids)} trace id(s)")
 
-    st.subheader("Trace IDs")
-    st.dataframe(pd.DataFrame({"trace": trace_ids}), use_container_width=True)
 
-    # 2) Select trace scope
-    selection_mode = st.radio("Fetch logs for:", ["Single trace", "All traces"], index=0)
-    if selection_mode == "Single trace":
-        selected_trace = st.selectbox("Select trace id", trace_ids)
-        chosen_trace_ids = [selected_trace]
-    else:
-        chosen_trace_ids = trace_ids
+# 2) Render trace UI whenever we have trace_ids (even on reruns)
+trace_ids = st.session_state.get("trace_ids", [])
+ctx = st.session_state.get("search_ctx", {})
 
-    # 3) Fetch logs (NO batch_id here)
-    spl2 = logs_query(index, sourcetype, chosen_trace_ids)
-    logs_rows = run_query(svc, spl2, earliest, latest, debug=debug, label="Fetch logs")
+if not trace_ids:
+    st.info("Enter App ID and click **Run Search** to discover trace IDs.")
+    st.stop()
+
+st.subheader("Trace IDs")
+st.dataframe(pd.DataFrame({"trace": trace_ids}), use_container_width=True)
+
+selection_mode = st.radio("Fetch logs for:", ["Single trace", "All traces"], index=0, key="sel_mode")
+
+if selection_mode == "Single trace":
+    selected_trace = st.selectbox("Select trace id", trace_ids, key="sel_trace")
+    chosen_trace_ids = [selected_trace]
+else:
+    chosen_trace_ids = trace_ids
+    if len(chosen_trace_ids) > MAX_TRACES_ALL:
+        st.warning(f"Too many traces ({len(chosen_trace_ids)}). Capping to first {MAX_TRACES_ALL} to avoid query limits.")
+        chosen_trace_ids = chosen_trace_ids[:MAX_TRACES_ALL]
+
+# 3) Fetch logs on button click (stable UI)
+fetch_logs = st.button("Fetch Logs", type="primary", key="fetch_logs_btn")
+
+if fetch_logs:
+    svc = connect()
+    spl2 = logs_query(ctx.get("index", DEFAULT_INDEX), ctx.get("sourcetype", DEFAULT_SOURCETYPE), chosen_trace_ids)
+    logs_rows = run_query(
+        svc,
+        spl2,
+        ctx.get("earliest", "-24h"),
+        ctx.get("latest", "now"),
+        debug=ctx.get("debug", False),
+        label="Fetch logs"
+    )
 
     logs_rows = normalize_rows(logs_rows)
     df = pd.DataFrame(logs_rows)
+    st.session_state["logs_df"] = df
 
-    if df.empty:
-        st.warning("No logs returned for the selected trace id(s) in the chosen time range.")
-        st.stop()
+
+# 4) Display logs if available
+df = st.session_state.get("logs_df")
+
+if isinstance(df, pd.DataFrame) and not df.empty:
+    df = df.copy()
 
     if "_time" in df.columns:
         df["_time"] = pd.to_datetime(df["_time"], errors="coerce")
@@ -261,3 +309,5 @@ if run:
 
     st.subheader("Logs (sorted by timestamp)")
     st.dataframe(df, use_container_width=True)
+else:
+    st.info("Click **Fetch Logs** to load logs for the selected trace scope.")
