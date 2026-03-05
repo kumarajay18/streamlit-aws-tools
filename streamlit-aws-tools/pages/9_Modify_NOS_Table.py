@@ -178,7 +178,7 @@ with st.status(f"Scanning items where PipelineId == **{pipeline_id}** ...", expa
 df, key_map = normalize_rows(items)
 
 st.markdown(f"### 📋 Items for PipelineId: `{pipeline_id}`")
-st.dataframe(df, use_container_width=True, hide_index=True)
+st.dataframe(df, width='stretch', hide_index=True)
 
 st.markdown("---")
 st.subheader("✏️ Update Flags")
@@ -208,7 +208,7 @@ with col3:
     st.caption("Choose one or more BatchIds and set desired flags. Updates are applied with DynamoDB `UpdateItem`.")
 
 # Apply updates
-if st.button("✅ Apply Updates", type="primary", use_container_width=True, disabled=(len(target_batches) == 0)):
+if st.button("✅ Apply Updates", type="primary", width='stretch', disabled=(len(target_batches) == 0)):
     with st.status("Applying updates ...", expanded=True) as status:
         updated, errs = apply_updates(table, key_map, target_batches, set_current, set_transformed)
         if updated:
@@ -223,4 +223,4 @@ if st.button("✅ Apply Updates", type="primary", use_container_width=True, disa
         items = scan_items_for_pipeline(table, pipeline_id)
         df, key_map = normalize_rows(items)
         status.update(label="Refreshed", state="complete")
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width='stretch', hide_index=True)
