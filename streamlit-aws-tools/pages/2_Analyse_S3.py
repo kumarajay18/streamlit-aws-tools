@@ -68,6 +68,62 @@ def _coalesce_ext(key: str) -> str:
         return "xml.gz"
     m = re.search(r"\.([a-z0-9]+)$", k)
     return m.group(1) if m else ""
+def _build_entity_paths_df(source: str) -> Optional[pd.DataFrame]:
+    """
+    source: 'raw' or 'curated'
+    Returns a DataFrame with columns: [AppID, BucketType, Bucket, Entity, S3 Path]
+    """
+    if "qa_mapping_df" not in st.session_state:
+        st.warning("No mapping available. Use the mapping table above to select rows.")
+        return None
+
+    df_map_local = st.session_state["qa_mapping_df"]
+    sel = df_map_local[df_map_local["Select"] == True].copy()
+    if sel.empty:
+        st.warning("Select at least one row in the mapping table (click rows to select).")
+        return None
+
+    rows: List[Dict] = []
+    with st.status(f"Listing {source.upper()} entity paths…", expanded=False):
+        for _, r in sel.iterrows():
+            app = r.get("EnterpriseAppID")
+            if source == "raw":
+                rb = (r.get("RawBucket") or "").strip()
+                if not rb:
+                    continue
+                # Use your helper to get entity names under raw ("entity/<name>/")
+                entities = _list_entities_under_raw(rb)
+                for ent in entities:
+                    rows.append({
+                        "AppID": app,
+                        "BucketType": "Raw",
+                        "Bucket": rb,
+                        "Entity": ent,
+                        "S3 Path": f"s3://{rb}/entity/{ent}/",
+                    })
+            elif source == "curated":
+                cb = (r.get("CuratedBucket") or "").strip()
+                if not cb:
+                    continue
+                # Use your helper to get entity names at root ("<entity>/")
+                entities = _list_entities_under_curated(cb)
+                for ent in entities:
+                    rows.append({
+                        "AppID": app,
+                        "BucketType": "Curated",
+                        "Bucket": cb,
+                        "Entity": ent,
+                        "S3 Path": f"s3://{cb}/{ent}/",
+                    })
+            else:
+                st.error("Invalid source for entity listing.")
+                return None
+
+    if not rows:
+        st.info("No entities found for current selection and filters.")
+        return pd.DataFrame(columns=["AppID", "BucketType", "Bucket", "Entity", "S3 Path"])
+
+    return pd.DataFrame(rows).sort_values(["BucketType", "AppID", "Entity"]).reset_index(drop=True)
 
 def _list_common_prefixes(bucket: str, prefix: str) -> List[str]:
     paginator = s3.get_paginator("list_objects_v2")
@@ -778,7 +834,74 @@ with tab_qa:
 
         # persist
         st.session_state["qa_mapping_df"] = df_map
+    # ──────────────────────────────────────────────────────────────────────────
+        # NEW: Entity Path Helpers (RAW & CURATED)
+        # Lists entity paths so you can copy/paste OR send directly into Manual explorer
+        # ──────────────────────────────────────────────────────────────────────────
+        st.markdown("#### 🧭 Entity Path Helpers")
 
+        c_ent1, c_ent2, c_ent3 = st.columns([1, 1, 2])
+        btn_list_raw_entities = c_ent1.button(
+            "📜 List RAW entity paths",
+            use_container_width=True,
+            key="qa_btn_list_raw_entities"
+        )
+        btn_list_cur_entities = c_ent2.button(
+            "📜 List CURATED entity paths",
+            use_container_width=True,
+            key="qa_btn_list_cur_entities"
+        )
+        btn_clear_entities = c_ent3.button(
+            "🧹 Clear entity paths",
+            use_container_width=True,
+            key="qa_btn_clear_entity_paths"
+        )
+
+        if btn_clear_entities:
+            st.session_state.pop("qa_entity_paths_df", None)
+            st.session_state.pop("qa_entity_paths_selected_row", None)
+            st.success("Cleared entity paths.")
+            st.rerun()
+
+
+        if btn_list_raw_entities:
+            st.session_state["qa_entity_paths_df"] = _build_entity_paths_df("raw")
+
+        if btn_list_cur_entities:
+            st.session_state["qa_entity_paths_df"] = _build_entity_paths_df("curated")
+
+        # Show entity paths (and allow sending one into the Manual explorer input)
+        if "qa_entity_paths_df" in st.session_state:
+            df_paths = st.session_state["qa_entity_paths_df"]
+            with st.expander("Entity paths (click a row → then 'Use selected' to fill Manual S3 Path)", expanded=True):
+                evt_paths = st.dataframe(
+                    df_paths,
+                    use_container_width=True,
+                    hide_index=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key="qa_entity_paths_table"
+                )
+                chosen_row_idx: List[int] = []
+                try:
+                    if evt_paths is not None and getattr(evt_paths, "selection", None) is not None:
+                        chosen_row_idx = list(evt_paths.selection.rows or [])
+                except Exception:
+                    chosen_row_idx = st.session_state.get("qa_entity_paths_selected_row", [])
+
+                st.session_state["qa_entity_paths_selected_row"] = chosen_row_idx
+
+                chosen_path = None
+                if chosen_row_idx:
+                    chosen_path = df_paths.iloc[chosen_row_idx[0]]["S3 Path"]
+                    st.caption(f"Selected path: `{chosen_path}`")
+                if use_btn and chosen_path:
+                    # Push selection into the Manual Explorer's input
+                    st.session_state["qa_s3_path"] = chosen_path
+                    # Also reflect to the common key you use elsewhere if present
+                    st.session_state["s3_path"] = chosen_path
+                    st.success("Path copied to the 'S3 path' field in Manual Explorer below. You can now click 'Scan Path' or 'Top 10 Rows'.")
+                    st.rerun()
     st.divider()
 
     # Use shared filters for QA checks

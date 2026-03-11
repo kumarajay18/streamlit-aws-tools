@@ -1,0 +1,35 @@
+SELECT
+    qdas.depu_locl_date AS DEP_DATE,
+    qdas.OPRG_CARR_ALPHA_CODE,
+    qdas.OPRG_FLT_NO,
+    qdas.DEPU_AIPC AS DEP_PORT,
+    qdas.ARVL_AIPC AS ARV_PORT,
+    qcbg.BAG_JNY_AIPC AS BAG_JNY_START_PORT,
+    COUNT(DISTINCT (qcbg.AIR_CARR_NUM_CODE || '-' || qcbg.BAG_TAG_NUMBER)) AS BAGGAGE_COUNT
+FROM PQMF.QMU0101_BKG_REF qbr
+JOIN PQMF.QMUS110_TP_PAX qtp
+  ON qbr.TP_ID = qtp.TP_ID AND qbr.BKG_ID = qtp.BKG_ID
+ AND qtp.CAN_TXN_ID = 0 AND qbr.CAN_TXN_ID = 0
+JOIN PQMF.QMU0122_TP_PAX_SEG qtps
+  ON qtp.TP_ID = qtps.TP_ID AND qtp.BKG_ID = qtps.BKG_ID AND qtp.TP_PAX_ID = qtps.TP_PAX_ID
+ AND qtps.CAN_TXN_ID = 0
+JOIN PQMF.QMU0121_TP_AIR_SEG qtas
+  ON qtas.TP_ID = qtps.TP_ID AND qtas.BKG_ID = qtps.BKG_ID AND qtas.TP_AIR_SEG_ID = qtps.TP_AIR_SEG_ID
+ AND qtas.CAN_TXN_ID = 0
+JOIN PQMF.QMU0120_DATED_AIR_SEG qdas
+  ON qtas.DATED_AIR_SEG_ID = qdas.DATED_AIR_SEG_ID
+JOIN PQMF.QMU0123_TP_PAX_SEG_LEG tpsl
+  ON tpsl.TP_ID = qtps.TP_ID AND tpsl.BKG_ID = qtps.BKG_ID AND tpsl.TP_PAX_SEG_ID = qtps.TP_PAX_SEG_ID
+ AND tpsl.CAN_TXN_ID = 0
+JOIN PQMF.QMU0132_CHECKIN_BAG qcbg
+  ON qcbg.TP_ID = qtp.TP_ID AND qcbg.BKG_ID = qtp.BKG_ID AND qcbg.TP_PAX_SEG_LEG_ID = tpsl.TP_PAX_SEG_LEG_ID
+ AND qcbg.CAN_TXN_ID = 0
+WHERE
+    qdas.OPRG_CARR_ALPHA_CODE = NULLIF(TRIM(?), '')
+AND (qdas.OPRG_FLT_NO = NULLIF(TRIM(?), '') OR NULLIF(TRIM(?), '') IS NULL)
+AND (qcbg.BAG_JNY_AIPC = NULLIF(TRIM(?), '') OR NULLIF(TRIM(?), '') IS NULL)
+AND (qdas.depu_locl_date >= ? OR ? IS NULL)
+AND (qdas.depu_locl_date <= ? OR ? IS NULL)
+AND qtps.TVLD_STAT_CODE = 'T'
+GROUP BY 1,2,3,4,5,6
+ORDER BY 1,6;
