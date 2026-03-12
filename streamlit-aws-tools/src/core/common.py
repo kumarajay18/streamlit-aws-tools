@@ -6,6 +6,9 @@ import re
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Tuple, List, Optional
+from zoneinfo import ZoneInfo
+
+SYDNEY_TZ = ZoneInfo("Australia/Sydney")
 
 WIN_INVALID_CHARS = set('<>:"/\\|?*')
 
@@ -110,7 +113,8 @@ class PathUtils:
 
 def get_default_date_range() -> Tuple[datetime, datetime]:
     """
-    Return a ``(start, end)`` tuple covering the last 24 hours in the local timezone.
+    Return a ``(start, end)`` tuple covering the last 24 hours in Sydney time
+    (Australia/Sydney, AEDT/AEST).
 
     Both datetimes are timezone-aware and have microseconds stripped so they
     render cleanly in ``st.datetime_input`` widgets.
@@ -118,8 +122,7 @@ def get_default_date_range() -> Tuple[datetime, datetime]:
     Moved here from ``pages/2_Analyse_S3.py`` where it was defined inline and
     duplicated across multiple call-sites.
     """
-    tz = datetime.now().astimezone().tzinfo
-    end = datetime.now(tz=tz).replace(microsecond=0)
+    end = datetime.now(tz=SYDNEY_TZ).replace(microsecond=0)
     start = end - timedelta(days=1)
     return start, end
 

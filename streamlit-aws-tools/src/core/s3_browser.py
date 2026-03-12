@@ -58,7 +58,13 @@ class S3Browser:
         end_utc = self._to_utc_aware(end_utc) if end_utc else None
 
         paginator = self.s3.get_paginator("list_objects_v2")
-        pages = paginator.paginate(Bucket=bucket, Prefix=prefix or "")
+        # Use PaginationConfig so the AWS API only fetches up to `cap` items,
+        # making small-cap requests significantly faster on large buckets.
+        pages = paginator.paginate(
+            Bucket=bucket,
+            Prefix=prefix or "",
+            PaginationConfig={"MaxItems": cap, "PageSize": min(cap, 1000)},
+        )
 
         rows: List[Dict] = []
         count = 0
@@ -136,7 +142,11 @@ class S3Browser:
         end_utc = self._to_utc_aware(end_utc) if end_utc else None
 
         paginator = self.s3.get_paginator("list_object_versions")
-        pages = paginator.paginate(Bucket=bucket, Prefix=prefix or "")
+        pages = paginator.paginate(
+            Bucket=bucket,
+            Prefix=prefix or "",
+            PaginationConfig={"MaxItems": cap, "PageSize": min(cap, 1000)},
+        )
 
         rows: List[Dict] = []
         count = 0
