@@ -1,6 +1,7 @@
 # src/core/s3_browser.py
 from __future__ import annotations
 
+import re
 from typing import List, Dict, Optional
 from datetime import datetime, timezone
 from botocore.exceptions import ClientError
@@ -45,6 +46,42 @@ class S3Browser:
             return False
         return True
 
+    @staticmethod
+    def _literal_prefix(pattern: str) -> str:
+        """Return the longest leading literal (non-regex) portion of *pattern*.
+
+        This is the narrowest prefix we can pass to the S3 API so the
+        server-side scan is efficient.  Client-side regex filtering is then
+        applied to the full *pattern* after the listing.
+
+        Examples::
+
+            "entity/flight"          -> "entity/flight"   # no metacharacters
+            "entity/flight.*"        -> "entity/flight"
+            "entity/(flight|train)"  -> "entity/"
+            ""                       -> ""
+        """
+        special = set(r'\.^$*+?{}[]|()')
+        for i, ch in enumerate(pattern):
+            if ch in special:
+                return pattern[:i]
+        return pattern
+
+    @staticmethod
+    def _compile_prefix_pattern(pattern: str) -> Optional[re.Pattern]:
+        """Compile *pattern* as a regex for client-side key filtering.
+
+        Returns ``None`` when the pattern is empty so callers can skip the
+        filter cheaply.  Falls back to ``None`` on invalid regex (the literal
+        S3 prefix scan is still used in that case).
+        """
+        if not pattern:
+            return None
+        try:
+            return re.compile(pattern)
+        except re.error:
+            return None
+
     # ---------- Current objects ----------
 
     def list_objects(self, bucket: str, prefix: str, cap: int,
@@ -52,19 +89,43 @@ class S3Browser:
         """
         Returns rows: {Key, Size (MB), LastModified, StorageClass, S3 URI}
         LastModified is timezone-aware UTC.
+
+        *prefix* may contain regex metacharacters.  The longest literal leading
+        portion is used as the S3 API prefix so the server scan is narrow;
+        the full pattern is then applied client-side with ``re.search``.
+
+        When a time filter (start_utc / end_utc) is active the AWS
+        ``MaxItems`` pagination cap is **removed** so that every object in the
+        prefix is inspected before the time window is applied.  Without this,
+        objects that match the time range but sit beyond position *cap* in S3's
+        alphabetical ordering would never be seen.  Results are still capped at
+        *cap* after filtering.
         """
         # Normalize bounds to UTC-aware
         start_utc = self._to_utc_aware(start_utc) if start_utc else None
         end_utc = self._to_utc_aware(end_utc) if end_utc else None
 
+        # Separate literal S3 prefix from the optional regex suffix
+        literal_pfx = self._literal_prefix(prefix or "")
+        key_pattern = self._compile_prefix_pattern(prefix or "")
+
         paginator = self.s3.get_paginator("list_objects_v2")
-        # Use PaginationConfig so the AWS API only fetches up to `cap` items,
-        # making small-cap requests significantly faster on large buckets.
-        pages = paginator.paginate(
-            Bucket=bucket,
-            Prefix=prefix or "",
-            PaginationConfig={"MaxItems": cap, "PageSize": min(cap, 1000)},
-        )
+
+        # When a time filter is active we must scan ALL pages first — MaxItems
+        # would cut the AWS scan before we reach objects in the target window.
+        time_filtering = bool(start_utc or end_utc)
+        if time_filtering:
+            pages = paginator.paginate(
+                Bucket=bucket,
+                Prefix=literal_pfx,
+                PaginationConfig={"PageSize": 1000},
+            )
+        else:
+            pages = paginator.paginate(
+                Bucket=bucket,
+                Prefix=literal_pfx,
+                PaginationConfig={"MaxItems": cap, "PageSize": min(cap, 1000)},
+            )
 
         rows: List[Dict] = []
         count = 0
@@ -79,6 +140,10 @@ class S3Browser:
                 lm_utc = self._to_utc_aware(lm_raw)
 
                 if not self._in_window(lm_utc, start_utc, end_utc):
+                    continue
+
+                # Apply client-side regex filter when the user supplied a pattern
+                if key_pattern and not key_pattern.search(key or ""):
                     continue
 
                 rows.append({
@@ -137,16 +202,31 @@ class S3Browser:
         """
         Returns rows: {Key, VersionId, IsLatest, IsDeleteMarker, Size (MB), LastModified, StorageClass, S3 URI}
         LastModified is timezone-aware UTC.
+
+        Same *prefix*-as-regex and time-filter scanning rules as
+        :meth:`list_objects` apply here.
         """
         start_utc = self._to_utc_aware(start_utc) if start_utc else None
         end_utc = self._to_utc_aware(end_utc) if end_utc else None
 
+        literal_pfx = self._literal_prefix(prefix or "")
+        key_pattern = self._compile_prefix_pattern(prefix or "")
+
         paginator = self.s3.get_paginator("list_object_versions")
-        pages = paginator.paginate(
-            Bucket=bucket,
-            Prefix=prefix or "",
-            PaginationConfig={"MaxItems": cap, "PageSize": min(cap, 1000)},
-        )
+
+        time_filtering = bool(start_utc or end_utc)
+        if time_filtering:
+            pages = paginator.paginate(
+                Bucket=bucket,
+                Prefix=literal_pfx,
+                PaginationConfig={"PageSize": 1000},
+            )
+        else:
+            pages = paginator.paginate(
+                Bucket=bucket,
+                Prefix=literal_pfx,
+                PaginationConfig={"MaxItems": cap, "PageSize": min(cap, 1000)},
+            )
 
         rows: List[Dict] = []
         count = 0
@@ -159,8 +239,11 @@ class S3Browser:
                 lm_utc = self._to_utc_aware(v.get("LastModified"))
                 if not self._in_window(lm_utc, start_utc, end_utc):
                     continue
+                key = v.get("Key")
+                if key_pattern and not key_pattern.search(key or ""):
+                    continue
                 rows.append({
-                    "Key": v.get("Key"),
+                    "Key": key,
                     "VersionId": v.get("VersionId"),
                     "IsLatest": v.get("IsLatest", False),
                     "IsDeleteMarker": False,
@@ -181,8 +264,11 @@ class S3Browser:
                     lm_utc = self._to_utc_aware(dm.get("LastModified"))
                     if not self._in_window(lm_utc, start_utc, end_utc):
                         continue
+                    key = dm.get("Key")
+                    if key_pattern and not key_pattern.search(key or ""):
+                        continue
                     rows.append({
-                        "Key": dm.get("Key"),
+                        "Key": key,
                         "VersionId": dm.get("VersionId"),
                         "IsLatest": dm.get("IsLatest", False),
                         "IsDeleteMarker": True,

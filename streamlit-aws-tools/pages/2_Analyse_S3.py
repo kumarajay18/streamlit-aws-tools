@@ -364,9 +364,16 @@ with st.sidebar:
 
     # Prefix
     prefix_all = st.text_input(
-        "Prefix (applies to listings)",
+        "Prefix / pattern (applies to listings)",
         value=st.session_state.get(SK.FLOW_PREFIX, ""),
-        placeholder="e.g., entity/ or folder/subfolder/"
+        placeholder="e.g., entity/flight or entity/flight.*\\.parquet",
+        help=(
+            "Supports regex patterns. The longest literal leading portion is used as the S3 "
+            "API prefix for an efficient server-side scan; the full pattern is then applied "
+            "client-side with `re.search`. "
+            "Examples: `entity/flight` matches `entity/flight/`, `entity/flightoperations/`, etc. "
+            "`entity/flight.*\\.parquet` matches only parquet files under any entity/flight… path."
+        ),
     )
     st.session_state[SK.FLOW_PREFIX] = prefix_all
 
@@ -617,6 +624,18 @@ with tab_analyse:
                 if c in df.columns:
                     display_cols.append(c)
             view_df = df[display_cols].copy().reset_index(drop=True)
+
+            # Convert LastModified (UTC) to Sydney time for display
+            if "LastModified" in view_df.columns:
+                view_df["LastModified (Sydney)"] = view_df["LastModified"].apply(
+                    lambda x: x.astimezone(SYDNEY_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+                    if pd.notna(x) and hasattr(x, "astimezone") else ""
+                )
+                # Replace the raw UTC column with the Sydney-time string so the
+                # table only shows one timestamp column (no confusing UTC column).
+                lm_idx = view_df.columns.get_loc("LastModified")
+                view_df.insert(lm_idx, "LastModified (Sydney)", view_df.pop("LastModified (Sydney)"))
+                view_df = view_df.drop(columns=["LastModified"])
 
             # Single-click fix: restore previous selection via `default`
             _sel_key = f"flow_selrows_{bucket}"

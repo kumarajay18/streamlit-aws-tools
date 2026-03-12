@@ -590,3 +590,151 @@ class TestS3SessionManager:
         m1 = get_manager()
         m2 = get_manager()
         assert m1 is m2
+
+
+# ---------------------------------------------------------------------------
+# src.core.s3_browser — S3Browser
+# ---------------------------------------------------------------------------
+
+def _make_paginator(pages: list):
+    """Return a minimal paginator mock whose .paginate() returns *pages*."""
+    pager = MagicMock()
+    pager.paginate.return_value = iter(pages)
+    return pager
+
+
+def _utc(year, month, day, hour=0, minute=0):
+    return datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+
+
+class TestS3BrowserLiteralPrefix:
+    def test_no_metacharacters(self):
+        from src.core.s3_browser import S3Browser
+        assert S3Browser._literal_prefix("entity/flight") == "entity/flight"
+
+    def test_dot_star_suffix(self):
+        from src.core.s3_browser import S3Browser
+        assert S3Browser._literal_prefix("entity/flight.*") == "entity/flight"
+
+    def test_group_metachar(self):
+        from src.core.s3_browser import S3Browser
+        assert S3Browser._literal_prefix("entity/(flight|train)") == "entity/"
+
+    def test_empty_string(self):
+        from src.core.s3_browser import S3Browser
+        assert S3Browser._literal_prefix("") == ""
+
+    def test_backslash_dot_extension(self):
+        from src.core.s3_browser import S3Browser
+        # The backslash is the first special char
+        assert S3Browser._literal_prefix("folder/file\\.csv") == "folder/file"
+
+
+class TestS3BrowserCompilePrefixPattern:
+    def test_empty_returns_none(self):
+        from src.core.s3_browser import S3Browser
+        assert S3Browser._compile_prefix_pattern("") is None
+
+    def test_valid_regex_compiles(self):
+        from src.core.s3_browser import S3Browser
+        pat = S3Browser._compile_prefix_pattern("entity/flight.*")
+        assert pat is not None
+        assert pat.search("entity/flightoperations/file.csv")
+
+    def test_invalid_regex_returns_none(self):
+        from src.core.s3_browser import S3Browser
+        assert S3Browser._compile_prefix_pattern("[invalid") is None
+
+
+class TestS3BrowserListObjects:
+    """list_objects — time filter and regex prefix behaviour."""
+
+    def _make_obj(self, key: str, lm: datetime, size_bytes: int = 1024):
+        return {"Key": key, "LastModified": lm, "Size": size_bytes, "StorageClass": "STANDARD"}
+
+    def _browser_with_pages(self, pages):
+        client = MagicMock()
+        client.get_paginator.return_value = _make_paginator(pages)
+        from src.core.s3_browser import S3Browser
+        return S3Browser(client)
+
+    # ── time filter removes MaxItems ──────────────────────────────────────────
+
+    def test_no_time_filter_uses_max_items(self):
+        """Without a time filter, MaxItems is passed to PaginationConfig."""
+        browser = self._browser_with_pages([{"Contents": []}])
+        browser.list_objects("bkt", "pfx/", cap=50)
+        call_kwargs = browser.s3.get_paginator("list_objects_v2").paginate.call_args[1]
+        assert call_kwargs["PaginationConfig"]["MaxItems"] == 50
+
+    def test_time_filter_removes_max_items(self):
+        """With a time filter, MaxItems must NOT be in PaginationConfig so all
+        pages are scanned before the window is applied."""
+        browser = self._browser_with_pages([{"Contents": []}])
+        browser.list_objects("bkt", "pfx/", cap=50, start_utc=_utc(2024, 1, 1))
+        call_kwargs = browser.s3.get_paginator("list_objects_v2").paginate.call_args[1]
+        assert "MaxItems" not in call_kwargs["PaginationConfig"]
+
+    def test_time_filter_objects_beyond_cap_position_are_found(self):
+        """Objects that match the time range but sit beyond position *cap* in
+        the bucket must be returned when a time filter is active."""
+        # Simulate 5 objects: first 3 are outside the window, last 2 are inside
+        window_start = _utc(2024, 6, 1)
+        objs = [
+            self._make_obj(f"obj_{i}.csv", _utc(2024, 1, i + 1)) for i in range(3)
+        ] + [
+            self._make_obj(f"obj_{i}.csv", _utc(2024, 6, i + 1)) for i in range(3, 5)
+        ]
+        pages = [{"Contents": objs}]
+        browser = self._browser_with_pages(pages)
+        rows = browser.list_objects("bkt", "", cap=3, start_utc=window_start)
+        # All matching objects are returned even though cap=3 < total objects
+        assert len(rows) == 2
+        assert all(row["LastModified"] >= window_start for row in rows)
+
+    # ── regex prefix ─────────────────────────────────────────────────────────
+
+    def test_literal_prefix_sent_to_api(self):
+        """The S3 API receives only the literal leading portion of the pattern."""
+        browser = self._browser_with_pages([{"Contents": []}])
+        browser.list_objects("bkt", "entity/flight.*", cap=10)
+        call_kwargs = browser.s3.get_paginator("list_objects_v2").paginate.call_args[1]
+        assert call_kwargs["Prefix"] == "entity/flight"
+
+    def test_regex_filters_results(self):
+        """Only keys matching the full pattern are returned."""
+        objs = [
+            self._make_obj("entity/flight/data.csv", _utc(2024, 1, 1)),
+            self._make_obj("entity/flightoperations/data.csv", _utc(2024, 1, 2)),
+            self._make_obj("entity/other/data.csv", _utc(2024, 1, 3)),
+        ]
+        # Pattern "entity/flight" should match the first two (starts-with via regex search)
+        # but NOT "entity/other" (literal prefix would have returned all three)
+        browser = self._browser_with_pages([{"Contents": objs}])
+        rows = browser.list_objects("bkt", "entity/flight", cap=10)
+        keys = [r["Key"] for r in rows]
+        assert "entity/flight/data.csv" in keys
+        assert "entity/flightoperations/data.csv" in keys
+        assert "entity/other/data.csv" not in keys
+
+    def test_regex_dot_star_parquet(self):
+        """entity/flight.*\\.parquet only returns parquet files."""
+        objs = [
+            self._make_obj("entity/flight/2024/data.parquet", _utc(2024, 1, 1)),
+            self._make_obj("entity/flight/2024/data.csv", _utc(2024, 1, 2)),
+            self._make_obj("entity/flightops/2024/data.parquet", _utc(2024, 1, 3)),
+        ]
+        browser = self._browser_with_pages([{"Contents": objs}])
+        rows = browser.list_objects("bkt", r"entity/flight.*\.parquet", cap=10)
+        keys = [r["Key"] for r in rows]
+        assert "entity/flight/2024/data.parquet" in keys
+        assert "entity/flightops/2024/data.parquet" in keys
+        assert "entity/flight/2024/data.csv" not in keys
+
+    def test_results_capped_at_cap(self):
+        """Even with time filter active, results are capped at *cap*."""
+        window_start = _utc(2024, 1, 1)
+        objs = [self._make_obj(f"obj_{i}.csv", _utc(2024, 6, i + 1)) for i in range(20)]
+        browser = self._browser_with_pages([{"Contents": objs}])
+        rows = browser.list_objects("bkt", "", cap=5, start_utc=window_start)
+        assert len(rows) == 5
