@@ -32,11 +32,15 @@ class S3Downloader:
         try:
             obj = self.s3.get_object(Bucket=bucket, Key=key, VersionId=version_id)
             body = obj["Body"]
-            # Stream to disk in chunks
+            # Stream to disk in 8 MB chunks.
+            # boto3 StreamingBody does NOT have iter_chunks(); use read(amt) instead.
             with open(PathUtils.windows_extended_path(target), "wb") as f:
-                for chunk in body.iter_chunks(chunk_size=8 * 1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
+                chunk_size = 8 * 1024 * 1024
+                while True:
+                    chunk = body.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
             return target, None
         except Exception as e:
             return None, str(e)

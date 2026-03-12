@@ -1,26 +1,45 @@
 # sql/registry.py
 from __future__ import annotations
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List
 import streamlit as st
 
 # Base directory for .sql files (this file sits inside /sql)
 SQL_DIR = Path(__file__).parent
 
-# A small, cached file loader so we read SQL once (reloads if file changes).
+
 @st.cache_data(show_spinner=False)
 def load_sql(file_name: str) -> str:
     """
     Load the contents of a .sql file from the sql/ directory.
-    The cache is invalidated automatically when the file changes (Streamlit handles hash by content).
+
+    Results are cached by Streamlit so the file is read only once per server
+    run (or whenever the file content changes).
+
+    Raises:
+        FileNotFoundError: When the requested ``.sql`` file does not exist.
     """
     path = SQL_DIR / file_name
     if not path.exists():
         raise FileNotFoundError(f"SQL file not found: {path}")
     return path.read_text(encoding="utf-8")
 
-# Query registry with metadata (kept near the SQL files).
-# name -> {category, file, params, help}
+
+# ---------------------------------------------------------------------------
+# QUERY_REGISTRY
+# ---------------------------------------------------------------------------
+# Structure:  query_display_name -> {
+#     "category": str,         — used for grouping in the UI
+#     "file":     str,         — filename inside sql/
+#     "params":   List[str],   — positional bind variables for the SQL template.
+#                                Many queries repeat the same name twice because
+#                                the SQL uses the parameter twice (e.g. once in a
+#                                SELECT list alias and once in a WHERE clause).
+#                                The consuming page zips this list with user-supplied
+#                                values using Python's str.format() / positional %s.
+#     "help":     str,         — one-line usage hint shown in the UI tooltip
+# }
+# ---------------------------------------------------------------------------
 QUERY_REGISTRY: Dict[str, Dict[str, Any]] = {
     # ============================
     # BAGGAGE
