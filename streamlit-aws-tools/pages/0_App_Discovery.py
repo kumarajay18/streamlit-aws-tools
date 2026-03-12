@@ -7,20 +7,21 @@ import streamlit as st
 import pandas as pd
 from botocore.exceptions import ClientError, BotoCoreError
 
-# YAML parsing with graceful fallback to regex if PyYAML isn't available
 try:
     import yaml  # type: ignore
 except Exception:
-    yaml = None  # fallback to regex-based parsing
+    yaml = None
 
 from src.aws_s3 import get_manager
+from src.config import DEFAULT_REGION, SK
+from src.ui.guards import require_aws_session
+from src.ui.context import show_session_caption
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Page config & constants
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="App Discovery", page_icon="🔎", layout="wide")
 st.title("🔎 App Discovery")
-REGION = "ap-southeast-2"
 
 ARTEFACT_BUCKET_SUBSTR = "deploymentfoundations-artefactsbucket"
 PACKAGED_FILE_NAME = "03-lake-root.packaged.cfn.yaml"
@@ -28,16 +29,8 @@ PACKAGED_FILE_NAME = "03-lake-root.packaged.cfn.yaml"
 # ──────────────────────────────────────────────────────────────────────────────
 # Require active session
 # ──────────────────────────────────────────────────────────────────────────────
-mgr = get_manager()
-if not mgr.has_active_session():
-    st.warning("No active AWS session. Use the home/top bar to log in.")
-    st.stop()
-
-ctx = mgr.current_context()
-st.caption(
-    f"Using profile **{ctx.get('profile')}**, region **{REGION}**. "
-    f"S3 endpoint: **{ctx.get('s3_endpoint_url') or 'standard'}**"
-)
+mgr = require_aws_session()
+ctx = show_session_caption()
 
 s3 = mgr.get_s3_client()
 
@@ -58,7 +51,7 @@ def list_buckets_all() -> List[str]:
 
 
 def list_lambda_functions_matching(session, appids: List[str]) -> List[Dict]:
-    lam = session.client("lambda", region_name=REGION)
+    lam = session.client("lambda", region_name=DEFAULT_REGION)
 
     def needles_for_appids(ids: List[str]) -> Set[str]:
         needles: Set[str] = set()
@@ -105,11 +98,11 @@ def list_lambda_functions_matching(session, appids: List[str]) -> List[Dict]:
 
 
 def console_link_s3_bucket(bucket: str) -> str:
-    return f"https://s3.console.aws.amazon.com/s3/buckets/{bucket}?region={REGION}&tab=objects"
+    return f"https://s3.console.aws.amazon.com/s3/buckets/{bucket}?region={DEFAULT_REGION}&tab=objects"
 
 
 def console_link_lambda(fn_name: str) -> str:
-    return f"https://{REGION}.console.aws.amazon.com/lambda/home?region={REGION}#/functions/{fn_name}?tab=configuration"
+    return f"https://{DEFAULT_REGION}.console.aws.amazon.com/lambda/home?region={DEFAULT_REGION}#/functions/{fn_name}?tab=configuration"
 
 
 # ──────────────────────────────────────────────────────────────────────────────

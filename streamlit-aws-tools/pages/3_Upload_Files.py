@@ -8,8 +8,11 @@ import streamlit as st
 from boto3.s3.transfer import TransferConfig
 
 from src.aws_s3 import get_manager
+from src.config import SK
 from src.core.common import S3Utils
 from src.core.s3_uploader import S3Uploader
+from src.ui.guards import require_aws_session
+from src.ui.context import show_session_caption
 
 st.set_page_config(page_title="Upload S3 Files", page_icon="⬆️", layout="wide")
 st.title("⬆️ Upload Files & Folders to S3")
@@ -17,16 +20,8 @@ st.title("⬆️ Upload Files & Folders to S3")
 # -----------------------------
 # Require an active session
 # -----------------------------
-mgr = get_manager()
-if not mgr.has_active_session():
-    st.warning("No active AWS session. Go to the home page and click **Login with AWS SSO** first (or Reuse Existing Session).")
-    st.stop()
-
-ctx = mgr.current_context()
-st.caption(
-    f"Using profile **{ctx.get('profile')}**, region **{ctx.get('region')}**. "
-    f"S3 endpoint: **{ctx.get('s3_endpoint_url') or 'standard'}**"
-)
+mgr = require_aws_session()
+ctx = show_session_caption()
 
 s3 = mgr.get_s3_client()
 uploader = S3Uploader(s3)
@@ -39,17 +34,17 @@ with st.sidebar:
 
     local_root_str = st.text_input(
         "Local path (file or folder)",
-        value=st.session_state.get("ul_local_root", str((Path.cwd() / "to_upload").resolve())),
+        value=st.session_state.get(SK.UL_LOCAL_ROOT, str((Path.cwd() / "to_upload").resolve())),
         placeholder="e.g., C:\\data\\export or /Users/you/data/export or C:\\file.csv"
     )
-    st.session_state["ul_local_root"] = local_root_str
+    st.session_state[SK.UL_LOCAL_ROOT] = local_root_str
 
     s3_dest_path = st.text_input(
         "Destination S3 path",
-        value=st.session_state.get("ul_dest_path", st.session_state.get("s3_path", "")),
+        value=st.session_state.get(SK.UL_DEST_PATH, st.session_state.get(SK.S3_PATH, "")),
         placeholder="e.g., s3://my-bucket/upload-root/  or  my-bucket/folder"
     )
-    st.session_state["ul_dest_path"] = s3_dest_path
+    st.session_state[SK.UL_DEST_PATH] = s3_dest_path
 
     preserve_structure = st.checkbox(
         "Preserve folder structure (relative to the local path)",
@@ -101,7 +96,7 @@ if scan_btn:
             files = list(uploader.iter_local_files(local_root))
             if not files:
                 st.info("No files found to upload.")
-                st.session_state.pop("ul_scan_df", None)
+                st.session_state.pop(SK.UL_SCAN_DF, None)
                 status.update(label="Scan complete", state="complete", expanded=False)
             else:
                 rows = []
@@ -121,7 +116,7 @@ if scan_btn:
                     total_bytes += size
 
                 df = pd.DataFrame(rows)
-                st.session_state["ul_scan_df"] = {
+                st.session_state[SK.UL_SCAN_DF] = {
                     "bucket": bucket,
                     "dest_prefix": dest_prefix,
                     "local_root": str(local_root),
@@ -143,8 +138,8 @@ if scan_btn:
 # -----------------------------
 # Upload
 # -----------------------------
-if "ul_scan_df" in st.session_state:
-    meta = st.session_state["ul_scan_df"]
+if SK.UL_SCAN_DF in st.session_state:
+    meta = st.session_state[SK.UL_SCAN_DF]
     st.markdown("### Planned Uploads")
     st.caption(f"Destination: **s3://{meta['bucket']}/{meta['dest_prefix']}** | Preserve structure: **{meta['preserve_structure']}**")
 
@@ -155,7 +150,7 @@ if "ul_scan_df" in st.session_state:
         hide_index=True,
         column_config={"Select": st.column_config.CheckboxColumn("Select", default=True)}
     )
-    st.session_state["ul_scan_df"]["df"] = edited
+    st.session_state[SK.UL_SCAN_DF]["df"] = edited
 
     selected = edited[edited["Select"] == True]
     selected_count = len(selected)

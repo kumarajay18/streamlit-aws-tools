@@ -10,6 +10,8 @@ import pandas as pd
 from botocore.exceptions import ClientError, BotoCoreError
 
 from src.aws_s3 import get_manager
+from src.config import DEFAULT_REGION, SK
+from src.ui.guards import require_aws_session
 from src.ui.topbar import render_topbar  # if you have a topbar, it will render here too
 
 st.set_page_config(page_title="Modify NOS Table", page_icon="🛠️", layout="wide")
@@ -17,24 +19,20 @@ st.set_page_config(page_title="Modify NOS Table", page_icon="🛠️", layout="w
 # -----------------------------
 # Session / AWS
 # -----------------------------
-mgr = get_manager()
-if not mgr.has_active_session():
-    st.warning("No active AWS session. Use the top bar to log in.")
-    st.stop()
+mgr = require_aws_session()
 
-default_region = "ap-southeast-2"
-region = st.session_state.get("nos_dynamo_region", default_region)
-pipeline_id = st.session_state.get("nos_pipeline_id", "")
+region = st.session_state.get(SK.NOS_REGION, DEFAULT_REGION)
+pipeline_id = st.session_state.get(SK.NOS_PIPELINE_ID, "")
 
 st.title("🛠️ Modify NOS Table")
 
 with st.sidebar:
     st.header("Context")
     pipeline_id = st.text_input("PipelineId", value=pipeline_id, help="From Lambda env PIPELINE_ID")
-    st.session_state["nos_pipeline_id"] = pipeline_id
+    st.session_state[SK.NOS_PIPELINE_ID] = pipeline_id
 
     region = st.text_input("Region", value=region)
-    st.session_state["nos_dynamo_region"] = region
+    st.session_state[SK.NOS_REGION] = region
 
 # -----------------------------
 # Helpers

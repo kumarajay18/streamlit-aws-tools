@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
-from datetime import timezone
-from typing import Tuple, List
+from datetime import datetime, timedelta, timezone
+from typing import Tuple, List, Optional
 
 WIN_INVALID_CHARS = set('<>:"/\\|?*')
 
@@ -101,3 +102,54 @@ class PathUtils:
         if os.name == "nt" and not abs_path.startswith("\\\\?\\"):
             return "\\\\?\\" + abs_path
         return abs_path
+
+
+# ---------------------------------------------------------------------------
+# Date / time helpers
+# ---------------------------------------------------------------------------
+
+def get_default_date_range() -> Tuple[datetime, datetime]:
+    """
+    Return a ``(start, end)`` tuple covering the last 24 hours in the local timezone.
+
+    Both datetimes are timezone-aware and have microseconds stripped so they
+    render cleanly in ``st.datetime_input`` widgets.
+
+    Moved here from ``pages/2_Analyse_S3.py`` where it was defined inline and
+    duplicated across multiple call-sites.
+    """
+    tz = datetime.now().astimezone().tzinfo
+    end = datetime.now(tz=tz).replace(microsecond=0)
+    start = end - timedelta(days=1)
+    return start, end
+
+
+# ---------------------------------------------------------------------------
+# S3 key / file-type helpers
+# ---------------------------------------------------------------------------
+
+def extract_file_extension(key: str) -> str:
+    """
+    Extract a normalised file extension from an S3 object key.
+
+    Handles compound extensions such as ``.csv.gz``, ``.json.gz``, ``.xml.gz``
+    before falling back to the last dotted segment.
+
+    Examples::
+
+        extract_file_extension("data/file.csv.gz")  # → "csv.gz"
+        extract_file_extension("data/file.parquet") # → "parquet"
+        extract_file_extension("data/no_ext")       # → ""
+
+    Moved here from ``pages/2_Analyse_S3.py`` where it was defined as the
+    private helper ``_coalesce_ext()``.
+    """
+    k = (key or "").lower()
+    if k.endswith(".json.gz") or k.endswith(".ndjson.gz") or k.endswith(".jsonl.gz"):
+        return "jsonl.gz"
+    if k.endswith(".csv.gz"):
+        return "csv.gz"
+    if k.endswith(".xml.gz"):
+        return "xml.gz"
+    m = re.search(r"\.([a-z0-9]+)$", k)
+    return m.group(1) if m else ""

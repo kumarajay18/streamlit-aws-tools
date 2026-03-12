@@ -3,7 +3,7 @@
 Unit tests for the core modules.
 
 Run with:
-    pip install pytest pytest-mock
+    pip install pytest pytest-mock pyarrow pandas boto3 botocore awswrangler
     pytest tests/ -v
 """
 from __future__ import annotations
@@ -11,9 +11,11 @@ from __future__ import annotations
 import io
 import gzip
 import json
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 import pytest
+
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -45,6 +47,21 @@ class TestConfig:
         from src.config import EXTRA_MIME_TYPES
         assert ".jsonl" in EXTRA_MIME_TYPES
 
+    def test_sk_has_aws_profile(self):
+        from src.config import SK
+        assert SK.AWS_PROFILE == "aws_profile"
+
+    def test_sk_has_tab_analyse_s3(self):
+        from src.config import SK
+        assert hasattr(SK, "TAB_ANALYSE_S3")
+
+    def test_sk_all_values_are_strings(self):
+        from src.config import SK
+        for attr in vars(SK):
+            if not attr.startswith("_"):
+                val = getattr(SK, attr)
+                assert isinstance(val, str), f"SK.{attr} should be a string, got {type(val)}"
+
 
 # ---------------------------------------------------------------------------
 # src.core.exceptions
@@ -62,6 +79,82 @@ class TestExceptions:
     def test_sso_login_error_is_dpes_error(self):
         from src.core.exceptions import SSOLoginError, DPESError
         assert issubclass(SSOLoginError, DPESError)
+
+
+# ---------------------------------------------------------------------------
+# src.core.common — S3Utils
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# src.core.common — new date-range + file-extension helpers
+# ---------------------------------------------------------------------------
+
+class TestGetDefaultDateRange:
+    def test_returns_tuple_of_two_datetimes(self):
+        from src.core.common import get_default_date_range
+        start, end = get_default_date_range()
+        assert isinstance(start, datetime)
+        assert isinstance(end, datetime)
+
+    def test_end_is_after_start(self):
+        from src.core.common import get_default_date_range
+        start, end = get_default_date_range()
+        assert end > start
+
+    def test_span_is_approximately_one_day(self):
+        from src.core.common import get_default_date_range
+        start, end = get_default_date_range()
+        diff = end - start
+        assert timedelta(hours=23, minutes=59) < diff <= timedelta(hours=24, seconds=1)
+
+    def test_both_are_timezone_aware(self):
+        from src.core.common import get_default_date_range
+        start, end = get_default_date_range()
+        assert start.tzinfo is not None
+        assert end.tzinfo is not None
+
+    def test_no_microseconds(self):
+        from src.core.common import get_default_date_range
+        _, end = get_default_date_range()
+        assert end.microsecond == 0
+
+
+class TestExtractFileExtension:
+    def test_parquet(self):
+        from src.core.common import extract_file_extension
+        assert extract_file_extension("path/to/file.parquet") == "parquet"
+
+    def test_csv(self):
+        from src.core.common import extract_file_extension
+        assert extract_file_extension("data.csv") == "csv"
+
+    def test_csv_gz(self):
+        from src.core.common import extract_file_extension
+        assert extract_file_extension("data.csv.gz") == "csv.gz"
+
+    def test_json_gz(self):
+        from src.core.common import extract_file_extension
+        assert extract_file_extension("events.json.gz") == "jsonl.gz"
+
+    def test_jsonl_gz(self):
+        from src.core.common import extract_file_extension
+        assert extract_file_extension("events.jsonl.gz") == "jsonl.gz"
+
+    def test_xml_gz(self):
+        from src.core.common import extract_file_extension
+        assert extract_file_extension("feed.xml.gz") == "xml.gz"
+
+    def test_no_extension(self):
+        from src.core.common import extract_file_extension
+        assert extract_file_extension("README") == ""
+
+    def test_empty_string(self):
+        from src.core.common import extract_file_extension
+        assert extract_file_extension("") == ""
+
+    def test_uppercase_is_normalised(self):
+        from src.core.common import extract_file_extension
+        assert extract_file_extension("DATA.CSV.GZ") == "csv.gz"
 
 
 # ---------------------------------------------------------------------------

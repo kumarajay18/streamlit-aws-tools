@@ -12,27 +12,22 @@ import streamlit as st
 from botocore.exceptions import ClientError, BotoCoreError
 
 from src.aws_s3 import get_manager
+from src.config import DEFAULT_REGION, SK
+from src.ui.guards import require_aws_session
+from src.ui.context import show_session_caption
 
 st.set_page_config(page_title="Analyse Lambda", page_icon="🧠", layout="wide")
 st.title("🧠 Analyse Lambda")
-REGION = "ap-southeast-2"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Require active session
 # ──────────────────────────────────────────────────────────────────────────────
-mgr = get_manager()
-if not mgr.has_active_session():
-    st.warning("No active AWS session. Go to the home page and log in first.")
-    st.stop()
-
-ctx = mgr.current_context()
-st.caption(
-    f"Using profile **{ctx.get('profile')}**, region **{REGION}**."
-)
+mgr = require_aws_session()
+ctx = show_session_caption(show_endpoint=False)
 
 session = mgr.get_session()
-lam = session.client("lambda", region_name=REGION)
-logs_client = session.client("logs", region_name=REGION)
+lam = session.client("lambda", region_name=DEFAULT_REGION)
+logs_client = session.client("logs", region_name=DEFAULT_REGION)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -206,10 +201,10 @@ def _tokenize_filter(text: str) -> List[str]:
 
 def list_lambda_functions_by_filter(session, filter_text: str, cap: int = 500) -> List[Dict]:
     """
-    List Lambda functions in REGION whose names contain ALL tokens from filter_text (case-insensitive).
+    List Lambda functions in DEFAULT_REGION whose names contain ALL tokens from filter_text (case-insensitive).
     cap: maximum number of matched results to return.
     """
-    client = session.client("lambda", region_name=REGION)
+    client = session.client("lambda", region_name=DEFAULT_REGION)
     tokens = [t.lower() for t in _tokenize_filter(filter_text)]
     paginator = client.get_paginator("list_functions")
 
@@ -393,7 +388,7 @@ if bulk_btn:
                 "Status/Message": (msg if dt_local else (msg or "No events")),
                 "LogGroup": log_group,
                 "LogStream": stream_name or "",
-                "ConsoleLink": f"https://{REGION}.console.aws.amazon.com/lambda/home?region={REGION}#/functions/{fn}?tab=monitoring"
+                "ConsoleLink": f"https://{DEFAULT_REGION}.console.aws.amazon.com/lambda/home?region={DEFAULT_REGION}#/functions/{fn}?tab=monitoring"
             })
             st.write(f"• {fn}: {rows[-1]['LatestEventTime'] or rows[-1]['Status/Message']}")
         df = pd.DataFrame(rows)
@@ -420,7 +415,7 @@ st.markdown("---")
 # Detailed actions for ONE selected Lambda
 # ──────────────────────────────────────────────────────────────────────────────
 fn_name = st.selectbox("Select a Lambda for detailed actions", selected_lambdas, index=0)
-st.markdown(f"🔗 Console: https://{REGION}.console.aws.amazon.com/lambda/home?region={REGION}#/functions/{fn_name}?tab=configuration")
+st.markdown(f"🔗 Console: https://{DEFAULT_REGION}.console.aws.amazon.com/lambda/home?region={DEFAULT_REGION}#/functions/{fn_name}?tab=configuration")
 
 # Single Lambda - quick latest check
 st.markdown("### ⏱️ Check Last Run (Selected Lambda)")
@@ -497,7 +492,7 @@ if is_etl_batch:
             window_pad = timedelta(minutes=2)
             start_time = datetime.now(timezone.utc) - window_pad
 
-            with st.status(f"Invoking **{fn_name}** in **{REGION}** ...", expanded=True) as status:
+            with st.status(f"Invoking **{fn_name}** in **{DEFAULT_REGION}** ...", expanded=True) as status:
                 request_id = None
                 try:
                     if dry_run:
@@ -534,7 +529,7 @@ if is_etl_batch:
 
                     st.session_state["lambda_anal_last_invocation"] = {
                         "fn_name": fn_name,
-                        "region": REGION,
+                        "region": DEFAULT_REGION,
                         "request_id": request_id,
                         "start_time": start_time.isoformat(),
                         "is_dry_run": bool(dry_run),
@@ -544,7 +539,7 @@ if is_etl_batch:
                         st.markdown("#### 🔎 CloudWatch logs for this invocation")
                         logs_lines = fetch_logs_with_retry(
                             session=session,
-                            region=REGION,
+                            region=DEFAULT_REGION,
                             function_name=fn_name,
                             request_id=request_id,
                             start_time=start_time,
@@ -581,7 +576,7 @@ if is_etl_batch:
             if inv.get("is_dry_run"):
                 st.info("Last invocation was a DryRun — no logs to fetch.")
             else:
-                if inv.get("fn_name") != fn_name or inv.get("region") != REGION:
+                if inv.get("fn_name") != fn_name or inv.get("region") != DEFAULT_REGION:
                     st.warning("The selected function changed since last run. Please invoke again.")
                 else:
                     try:
@@ -620,7 +615,7 @@ if is_etl_batch:
                 st.error("PIPELINE_ID not found in Lambda environment variables.")
             else:
                 st.session_state["nos_pipeline_id"] = pipeline_id
-                st.session_state["nos_dynamo_region"] = REGION
+                st.session_state["nos_dynamo_region"] = DEFAULT_REGION
                 try:
                     st.switch_page("pages/9_Modify_NOS_Table.py")
                 except Exception:

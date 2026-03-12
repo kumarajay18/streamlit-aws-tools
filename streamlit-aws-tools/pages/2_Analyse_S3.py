@@ -11,37 +11,26 @@ import streamlit as st
 from botocore.exceptions import ClientError, BotoCoreError
 
 from src.aws_s3 import get_manager
-from src.core.common import S3Utils
+from src.config import QA_LIST_CAP, RAW_LAST_N_DATES, CURATED_LAST_N_BATCHES, SK
+from src.core.common import S3Utils, get_default_date_range, extract_file_extension
 from src.core.s3_browser import S3Browser
 from src.core.s3_downloader import S3Downloader
 from src.core.s3_deleter import S3Deleter
 from src.core.qa_inspector import QAInspector
+from src.ui.guards import require_aws_session
+from src.ui.context import show_session_caption
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Page config
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="S3 Flow (Analyse + QA)", page_icon="🧭", layout="wide")
 st.title("🧭 S3 Flow — Analyse + ETL QA")
-REGION = "ap-southeast-2"
-
-# QA constants
-LIST_CAP_OBJECTS = 5000  # overall cap for large prefix scans (QA funcs)
-RAW_LAST_N_DATES = 3
-CURATED_LAST_N_BATCHES = 5
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Require active session
+# Require active session (replaces 4-line copy-paste guard)
 # ──────────────────────────────────────────────────────────────────────────────
-mgr = get_manager()
-if not mgr.has_active_session():
-    st.warning("No active AWS session. Go to Home and log in first.")
-    st.stop()
-
-ctx = mgr.current_context()
-st.caption(
-    f"Using profile **{ctx.get('profile')}**, region **{ctx.get('region') or REGION}**. "
-    f"S3 endpoint: **{ctx.get('s3_endpoint_url') or 'standard'}**"
-)
+mgr = require_aws_session()
+ctx = show_session_caption()
 
 s3 = mgr.get_s3_client()
 browser = S3Browser(s3)
@@ -52,32 +41,19 @@ qa = QAInspector(boto3_client=s3, boto3_session=mgr.get_session(), s3_endpoint_u
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers (shared)
 # ──────────────────────────────────────────────────────────────────────────────
-def _safe_dt_default_range() -> Tuple[datetime, datetime]:
-    tz = datetime.now().astimezone().tzinfo
-    end_ = datetime.now(tz=tz).replace(microsecond=0)
-    start_ = end_ - timedelta(days=1)
-    return start_, end_
-
-def _coalesce_ext(key: str) -> str:
-    k = (key or "").lower()
-    if k.endswith(".json.gz"):
-        return "json.gz"
-    if k.endswith(".csv.gz"):
-        return "csv.gz"
-    if k.endswith(".xml.gz"):
-        return "xml.gz"
-    m = re.search(r"\.([a-z0-9]+)$", k)
-    return m.group(1) if m else ""
+# get_default_date_range() and extract_file_extension() have been moved to
+# src/core/common.py and are imported above.  All call-sites in this file now
+# use those imports directly.
 def _build_entity_paths_df(source: str) -> Optional[pd.DataFrame]:
     """
     source: 'raw' or 'curated'
     Returns a DataFrame with columns: [AppID, BucketType, Bucket, Entity, S3 Path]
     """
-    if "qa_mapping_df" not in st.session_state:
+    if SK.QA_MAPPING_DF not in st.session_state:
         st.warning("No mapping available. Use the mapping table above to select rows.")
         return None
 
-    df_map_local = st.session_state["qa_mapping_df"]
+    df_map_local = st.session_state[SK.QA_MAPPING_DF]
     sel = df_map_local[df_map_local["Select"] == True].copy()
     if sel.empty:
         st.warning("Select at least one row in the mapping table (click rows to select).")
@@ -152,7 +128,7 @@ def _latest_object_time_filtered(
         rows = browser.list_object_versions(
             bucket=bucket,
             prefix=prefix,
-            cap=min(LIST_CAP_OBJECTS, cap_per_prefix),
+            cap=min(QA_LIST_CAP, cap_per_prefix),
             start_utc=start_utc,
             end_utc=end_utc,
             include_delete_markers=include_delete_markers,
@@ -162,7 +138,7 @@ def _latest_object_time_filtered(
         rows = browser.list_objects(
             bucket=bucket,
             prefix=prefix,
-            cap=min(LIST_CAP_OBJECTS, cap_per_prefix),
+            cap=min(QA_LIST_CAP, cap_per_prefix),
             start_utc=start_utc,
             end_utc=end_utc,
         )
@@ -329,14 +305,14 @@ def _sample_row_in_prefix(
 
 def _get_mapping_df() -> Optional[pd.DataFrame]:
     # ✅ 1) Prefer "selected mapping" passed from App Discovery (if present)
-    if "ad_selected_mapping_df" in st.session_state and isinstance(st.session_state["ad_selected_mapping_df"], pd.DataFrame):
-        return st.session_state["ad_selected_mapping_df"]
+    if SK.AD_SELECTED_MAPPING in st.session_state and isinstance(st.session_state[SK.AD_SELECTED_MAPPING], pd.DataFrame):
+        return st.session_state[SK.AD_SELECTED_MAPPING]
 
     # ✅ 2) Prefer qa mapping if present; else discovery mapping if present
-    if "qa_mapping_df" in st.session_state and isinstance(st.session_state["qa_mapping_df"], pd.DataFrame):
-        return st.session_state["qa_mapping_df"]
-    if "ad_mapping_df" in st.session_state and isinstance(st.session_state["ad_mapping_df"], pd.DataFrame):
-        return st.session_state["ad_mapping_df"]
+    if SK.QA_MAPPING_DF in st.session_state and isinstance(st.session_state[SK.QA_MAPPING_DF], pd.DataFrame):
+        return st.session_state[SK.QA_MAPPING_DF]
+    if SK.AD_MAPPING_DF in st.session_state and isinstance(st.session_state[SK.AD_MAPPING_DF], pd.DataFrame):
+        return st.session_state[SK.AD_MAPPING_DF]
     return None
 
 def _ensure_mapping_select_col(df: pd.DataFrame) -> pd.DataFrame:
@@ -373,47 +349,47 @@ with st.sidebar:
     # Prefix
     prefix_all = st.text_input(
         "Prefix (applies to listings)",
-        value=st.session_state.get("flow_prefix", ""),
+        value=st.session_state.get(SK.FLOW_PREFIX, ""),
         placeholder="e.g., entity/ or folder/subfolder/"
     )
-    st.session_state["flow_prefix"] = prefix_all
+    st.session_state[SK.FLOW_PREFIX] = prefix_all
 
     # Versions + delete markers
     versions_mode = st.checkbox(
         "List object versions",
-        value=st.session_state.get("flow_versions", False),
+        value=st.session_state.get(SK.FLOW_VERSIONS, False),
         help="If enabled, listings show object versions. Use delete marker toggle below."
     )
-    st.session_state["flow_versions"] = versions_mode
+    st.session_state[SK.FLOW_VERSIONS] = versions_mode
 
     include_delete_markers = st.checkbox(
         "Include delete markers (versions only)",
-        value=st.session_state.get("flow_delmarkers", False),
+        value=st.session_state.get(SK.FLOW_DEL_MARKERS, False),
         disabled=not versions_mode
     )
-    st.session_state["flow_delmarkers"] = include_delete_markers
+    st.session_state[SK.FLOW_DEL_MARKERS] = include_delete_markers
 
     # Time range
     st.markdown("### Time filter")
     enable_time_filter = st.checkbox(
         "Enable datetime range",
-        value=st.session_state.get("flow_time_enabled", False)
+        value=st.session_state.get(SK.FLOW_TIME_ENABLED, False)
     )
-    st.session_state["flow_time_enabled"] = enable_time_filter
+    st.session_state[SK.FLOW_TIME_ENABLED] = enable_time_filter
 
-    default_start, default_end = _safe_dt_default_range()
+    default_start, default_end = get_default_date_range()
     start_dt = st.datetime_input(
         "Start",
-        value=st.session_state.get("flow_start_dt", default_start),
+        value=st.session_state.get(SK.FLOW_START_DT, default_start),
         disabled=not enable_time_filter
     )
     end_dt = st.datetime_input(
         "End",
-        value=st.session_state.get("flow_end_dt", default_end),
+        value=st.session_state.get(SK.FLOW_END_DT, default_end),
         disabled=not enable_time_filter
     )
-    st.session_state["flow_start_dt"] = start_dt
-    st.session_state["flow_end_dt"] = end_dt
+    st.session_state[SK.FLOW_START_DT] = start_dt
+    st.session_state[SK.FLOW_END_DT] = end_dt
 
     start_utc = S3Utils.to_utc(start_dt) if enable_time_filter else None
     end_utc = S3Utils.to_utc(end_dt) if enable_time_filter else None
@@ -421,29 +397,62 @@ with st.sidebar:
     st.markdown("---")
     max_items = st.number_input(
         "Max results per bucket",
-        min_value=1, max_value=10000, value=int(st.session_state.get("flow_max_items", 1000)), step=100
+        min_value=1, max_value=10000, value=int(st.session_state.get(SK.FLOW_MAX_ITEMS, 1000)), step=100
     )
-    st.session_state["flow_max_items"] = int(max_items)
+    st.session_state[SK.FLOW_MAX_ITEMS] = int(max_items)
 
     cap_per_prefix = st.number_input(
         "QA cap per prefix",
-        min_value=100, max_value=10000, value=int(st.session_state.get("flow_cap_per_prefix", 1000)), step=100,
+        min_value=100, max_value=10000, value=int(st.session_state.get(SK.FLOW_CAP_PER_PREFIX, 1000)), step=100,
         help="Used by QA checks to cap scanning under each prefix."
     )
-    st.session_state["flow_cap_per_prefix"] = int(cap_per_prefix)
+    st.session_state[SK.FLOW_CAP_PER_PREFIX] = int(cap_per_prefix)
 
     # Download settings (Analyse only)
     st.markdown("---")
-    dest_default = st.session_state.get("flow_download_dir", str((Path.cwd() / "downloads").resolve()))
+    dest_default = st.session_state.get(SK.FLOW_DOWNLOAD_DIR, str((Path.cwd() / "downloads").resolve()))
     dest_dir_str = st.text_input("Download destination (local path)", value=dest_default)
-    st.session_state["flow_download_dir"] = dest_dir_str
-    preserve_structure = st.checkbox("Preserve folder structure", value=st.session_state.get("flow_preserve", True))
-    st.session_state["flow_preserve"] = preserve_structure
+    st.session_state[SK.FLOW_DOWNLOAD_DIR] = dest_dir_str
+    preserve_structure = st.checkbox("Preserve folder structure", value=st.session_state.get(SK.FLOW_PRESERVE, True))
+    st.session_state[SK.FLOW_PRESERVE] = preserve_structure
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Tabs: Analyse | QA
 # ──────────────────────────────────────────────────────────────────────────────
-tab_analyse, tab_qa = st.tabs(["📦 Analyse S3", "🧪 ETL QA Tools"])
+# Tab-stability fix: Streamlit always renders tab-0 as active after st.rerun().
+# We persist the user's last-clicked tab in query_params so that after any
+# button-triggered rerun the correct tab stays visible.
+_TAB_LABELS = ["📦 Analyse S3", "🧪 ETL QA Tools"]
+_TAB_KEYS   = ["analyse", "qa"]
+
+def _get_active_tab() -> int:
+    """Return the index of the currently active outer tab (0 or 1)."""
+    key = st.query_params.get(SK.TAB_ANALYSE_S3, "analyse")
+    try:
+        return _TAB_KEYS.index(key)
+    except ValueError:
+        return 0
+
+def _set_active_tab(idx: int) -> None:
+    st.query_params[SK.TAB_ANALYSE_S3] = _TAB_KEYS[idx]
+
+# Render a row of tab-selector buttons ABOVE st.tabs so the user can jump
+# back to the right tab after any button-triggered rerun.
+_tc1, _tc2 = st.columns(2)
+with _tc1:
+    if st.button("📦 Analyse S3", key="outer_tab_btn_analyse",
+                 type="primary" if _get_active_tab() == 0 else "secondary",
+                 use_container_width=True):
+        _set_active_tab(0)
+        st.rerun()
+with _tc2:
+    if st.button("🧪 ETL QA Tools", key="outer_tab_btn_qa",
+                 type="primary" if _get_active_tab() == 1 else "secondary",
+                 use_container_width=True):
+        _set_active_tab(1)
+        st.rerun()
+
+tab_analyse, tab_qa = st.tabs(_TAB_LABELS)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # TAB 1: Analyse S3 (flow)
@@ -454,7 +463,7 @@ with tab_analyse:
     mapping_df = _get_mapping_df()
     if mapping_df is None:
         # fallback to simple bucket list from discovery if provided
-        selected_buckets_fallback = st.session_state.get("ad_selected_buckets", [])
+        selected_buckets_fallback = st.session_state.get(SK.AD_SELECTED_BUCKETS, [])
         if not selected_buckets_fallback:
             st.info("No mapping/buckets received yet. Go to **App Discovery** and select apps/buckets.")
             st.stop()
@@ -472,30 +481,28 @@ with tab_analyse:
 
         nrows = len(df_map)
 
-        sel_rows = st.session_state.get("flow_map_selected_rows",st.session_state.get("ad_map_selected_rows", list(range(nrows))))
-
-        if sel_rows is None:
-            sel_rows = list(range(nrows))
-
+        # Restore previously-selected rows (default to all rows selected on first load)
+        sel_rows = st.session_state.get(
+            SK.FLOW_MAP_SELECTED,
+            st.session_state.get(SK.AD_MAP_SELECTED, list(range(nrows)))
+        ) or list(range(nrows))
 
         view_map = df_map[["EnterpriseAppID", "LandingBucket", "RawBucket", "CuratedBucket"]].copy()
 
+        # Single-click fix: pass `default` so the widget remembers its selection
+        # across reruns (without this, every rerun resets the selection and a
+        # second click is needed to actually register the row).
         evt_map = st.dataframe(
             view_map,
             use_container_width=True,
             hide_index=True,
             on_select="rerun",
             selection_mode="multi-row",
-            key="flow_map_df"
+            key="flow_map_df",
+            default={"selection": {"rows": sel_rows}},
         )
-        chosen_rows = []
-        try:
-            if evt_map is not None and getattr(evt_map, "selection", None) is not None:
-                chosen_rows = list(evt_map.selection.rows or [])
-        except Exception:
-            chosen_rows = st.session_state.get("flow_map_selected_rows", [])
-
-        st.session_state["flow_map_selected_rows"] = chosen_rows
+        chosen_rows = list(evt_map.selection.rows or []) if evt_map and getattr(evt_map, "selection", None) else sel_rows
+        st.session_state[SK.FLOW_MAP_SELECTED] = chosen_rows
 
         # sync Select column back into mapping
         df_map["Select"] = False
@@ -503,10 +510,10 @@ with tab_analyse:
             df_map.loc[chosen_rows, "Select"] = True
 
         # persist back to whichever mapping key exists
-        if "qa_mapping_df" in st.session_state:
-            st.session_state["qa_mapping_df"] = df_map
-        elif "ad_mapping_df" in st.session_state:
-            st.session_state["ad_mapping_df"] = df_map
+        if SK.QA_MAPPING_DF in st.session_state:
+            st.session_state[SK.QA_MAPPING_DF] = df_map
+        elif SK.AD_MAPPING_DF in st.session_state:
+            st.session_state[SK.AD_MAPPING_DF] = df_map
 
         buckets_landing = _selected_buckets_from_mapping(df_map, "LandingBucket")
         buckets_raw = _selected_buckets_from_mapping(df_map, "RawBucket")
@@ -530,7 +537,7 @@ with tab_analyse:
     clear_btn = a5.button("Clear Results", use_container_width=True, key="flow_clear")
 
     if clear_btn:
-        st.session_state.pop("flow_s3_results", None)
+        st.session_state.pop(SK.FLOW_S3_RESULTS, None)
         # clear per-bucket selection row indexes
         for k in list(st.session_state.keys()):
             if k.startswith("flow_selrows_") or k.startswith("flow_del_confirm_"):
@@ -572,7 +579,7 @@ with tab_analyse:
                     st.write(f"❌ {bucket}: {e}")
                     results[bucket] = pd.DataFrame(columns=["S3 URI", "Key", "Size (MB)", "LastModified"])
 
-            st.session_state["flow_s3_results"] = {
+            st.session_state[SK.FLOW_S3_RESULTS] = {
                 "bucket_type": label,
                 "buckets": buckets,
                 "prefix": prefix_all or "",
@@ -596,8 +603,8 @@ with tab_analyse:
         _list_for_buckets(buckets_curated, "Curated")
 
     # Render listing results + 1-click selection + download/delete
-    if "flow_s3_results" in st.session_state:
-        payload = st.session_state["flow_s3_results"]
+    if SK.FLOW_S3_RESULTS in st.session_state:
+        payload = st.session_state[SK.FLOW_S3_RESULTS]
         tables: Dict[str, pd.DataFrame] = payload.get("tables", {}) or {}
         bucket_type = payload.get("bucket_type", "Buckets")
 
@@ -607,8 +614,8 @@ with tab_analyse:
         st.markdown(f"### Results — {_fmt_bucket_type_label(bucket_type)} Buckets")
         st.caption(f"Prefix: `{prefix_all or ''}` | Versions: `{versions_mode}` | Delete markers: `{include_delete_markers}`")
 
-        dest_dir = Path(os.path.expanduser(st.session_state.get("flow_download_dir", ""))).resolve()
-        preserve_structure = bool(st.session_state.get("flow_preserve", True))
+        dest_dir = Path(os.path.expanduser(st.session_state.get(SK.FLOW_DOWNLOAD_DIR, ""))).resolve()
+        preserve_structure = bool(st.session_state.get(SK.FLOW_PRESERVE, True))
         for bucket, df in tables.items():
             st.markdown(f"#### 🪣 {bucket} — {len(df) if df is not None else 0} item(s)")
 
@@ -624,24 +631,21 @@ with tab_analyse:
                     display_cols.append(c)
             view_df = df[display_cols].copy().reset_index(drop=True)
 
-            # 1-click multi row selection (no checkbox!)
+            # Single-click fix: restore previous selection via `default`
+            _sel_key = f"flow_selrows_{bucket}"
+            _prev_sel: List[int] = st.session_state.get(_sel_key, [])
+
             evt = st.dataframe(
                 view_df,
                 use_container_width=True,
                 hide_index=True,
                 on_select="rerun",
                 selection_mode="multi-row",
-                key=f"flow_tbl_{bucket}"
+                key=f"flow_tbl_{bucket}",
+                default={"selection": {"rows": _prev_sel}},
             )
-
-            sel_rows: List[int] = []
-            try:
-                if evt is not None and getattr(evt, "selection", None) is not None:
-                    sel_rows = list(evt.selection.rows or [])
-            except Exception:
-                sel_rows = st.session_state.get(f"flow_selrows_{bucket}", [])
-
-            st.session_state[f"flow_selrows_{bucket}"] = sel_rows
+            sel_rows = list(evt.selection.rows or []) if evt and getattr(evt, "selection", None) else _prev_sel
+            st.session_state[_sel_key] = sel_rows
 
             selected_df = view_df.iloc[sel_rows].copy() if sel_rows else view_df.iloc[0:0].copy()
             st.write(f"Selected: **{len(selected_df)}** item(s).")
@@ -753,8 +757,8 @@ with tab_analyse:
         else:
             # determine buckets from last listing if exists; else from mapping
             buckets_for_latest = []
-            if "flow_s3_results" in st.session_state:
-                buckets_for_latest = st.session_state["flow_s3_results"].get("buckets", []) or []
+            if SK.FLOW_S3_RESULTS in st.session_state:
+                buckets_for_latest = st.session_state[SK.FLOW_S3_RESULTS].get("buckets", []) or []
             if not buckets_for_latest:
                 # fall back
                 buckets_for_latest = buckets_raw or buckets_landing or buckets_curated
@@ -792,48 +796,43 @@ with tab_qa:
     else:
         df_map = _ensure_mapping_select_col(mapping_df)
         nrows = len(df_map)
-        sel_rows = st.session_state.get("qa_map_selected_rows", list(range(nrows)))
+        sel_rows = st.session_state.get(SK.QA_MAP_SELECTED, list(range(nrows))) or list(range(nrows))
 
         mh1, mh2, mh3 = st.columns([1, 1, 1])
         with mh1:
             if st.button("✅ Select All (Mapping)", use_container_width=True, key="qa_map_sel_all_btn"):
-                st.session_state["qa_map_selected_rows"] = list(range(nrows))
+                st.session_state[SK.QA_MAP_SELECTED] = list(range(nrows))
                 st.rerun()
         with mh2:
             if st.button("🧹 Clear (Mapping)", use_container_width=True, key="qa_map_clear_btn"):
-                st.session_state["qa_map_selected_rows"] = []
+                st.session_state[SK.QA_MAP_SELECTED] = []
                 st.rerun()
         with mh3:
             if st.button("🔁 Invert (Mapping)", use_container_width=True, key="qa_map_invert_btn"):
-                st.session_state["qa_map_selected_rows"] = sorted(set(range(nrows)) - set(sel_rows))
+                st.session_state[SK.QA_MAP_SELECTED] = sorted(set(range(nrows)) - set(sel_rows))
                 st.rerun()
 
         view_map = df_map[["EnterpriseAppID", "LandingBucket", "RawBucket", "CuratedBucket"]].copy()
 
+        # Single-click fix
         evt = st.dataframe(
             view_map,
             use_container_width=True,
             hide_index=True,
             on_select="rerun",
             selection_mode="multi-row",
-            key="qa_map_df"
+            key="qa_map_df",
+            default={"selection": {"rows": sel_rows}},
         )
-
-        chosen = []
-        try:
-            if evt is not None and getattr(evt, "selection", None) is not None:
-                chosen = list(evt.selection.rows or [])
-        except Exception:
-            chosen = st.session_state.get("qa_map_selected_rows", [])
-
-        st.session_state["qa_map_selected_rows"] = chosen
+        chosen = list(evt.selection.rows or []) if evt and getattr(evt, "selection", None) else sel_rows
+        st.session_state[SK.QA_MAP_SELECTED] = chosen
 
         df_map["Select"] = False
         if chosen:
             df_map.loc[chosen, "Select"] = True
 
         # persist
-        st.session_state["qa_mapping_df"] = df_map
+        st.session_state[SK.QA_MAPPING_DF] = df_map
     # ──────────────────────────────────────────────────────────────────────────
         # NEW: Entity Path Helpers (RAW & CURATED)
         # Lists entity paths so you can copy/paste OR send directly into Manual explorer
@@ -858,38 +857,34 @@ with tab_qa:
         )
 
         if btn_clear_entities:
-            st.session_state.pop("qa_entity_paths_df", None)
-            st.session_state.pop("qa_entity_paths_selected_row", None)
+            st.session_state.pop(SK.QA_ENTITY_PATHS_DF, None)
+            st.session_state.pop("_ep_sel_row", None)
             st.success("Cleared entity paths.")
             st.rerun()
 
 
         if btn_list_raw_entities:
-            st.session_state["qa_entity_paths_df"] = _build_entity_paths_df("raw")
+            st.session_state[SK.QA_ENTITY_PATHS_DF] = _build_entity_paths_df("raw")
 
         if btn_list_cur_entities:
-            st.session_state["qa_entity_paths_df"] = _build_entity_paths_df("curated")
+            st.session_state[SK.QA_ENTITY_PATHS_DF] = _build_entity_paths_df("curated")
 
         # Show entity paths (and allow sending one into the Manual explorer input)
-        if "qa_entity_paths_df" in st.session_state:
-            df_paths = st.session_state["qa_entity_paths_df"]
+        if SK.QA_ENTITY_PATHS_DF in st.session_state:
+            df_paths = st.session_state[SK.QA_ENTITY_PATHS_DF]
             with st.expander("Entity paths (click a row → then 'Use selected' to fill Manual S3 Path)", expanded=True):
+                _ep_sel = st.session_state.get("_ep_sel_row", [])
                 evt_paths = st.dataframe(
                     df_paths,
                     use_container_width=True,
                     hide_index=True,
                     on_select="rerun",
                     selection_mode="single-row",
-                    key="qa_entity_paths_table"
+                    key="qa_entity_paths_table",
+                    default={"selection": {"rows": _ep_sel}},
                 )
-                chosen_row_idx: List[int] = []
-                try:
-                    if evt_paths is not None and getattr(evt_paths, "selection", None) is not None:
-                        chosen_row_idx = list(evt_paths.selection.rows or [])
-                except Exception:
-                    chosen_row_idx = st.session_state.get("qa_entity_paths_selected_row", [])
-
-                st.session_state["qa_entity_paths_selected_row"] = chosen_row_idx
+                chosen_row_idx: List[int] = list(evt_paths.selection.rows or []) if evt_paths and getattr(evt_paths, "selection", None) else _ep_sel
+                st.session_state["_ep_sel_row"] = chosen_row_idx
 
                 chosen_path = None
                 if chosen_row_idx:
@@ -897,9 +892,9 @@ with tab_qa:
                     st.caption(f"Selected path: `{chosen_path}`")
                 if use_btn and chosen_path:
                     # Push selection into the Manual Explorer's input
-                    st.session_state["qa_s3_path"] = chosen_path
+                    st.session_state[SK.QA_S3_PATH] = chosen_path
                     # Also reflect to the common key you use elsewhere if present
-                    st.session_state["s3_path"] = chosen_path
+                    st.session_state[SK.S3_PATH] = chosen_path
                     st.success("Path copied to the 'S3 path' field in Manual Explorer below. You can now click 'Scan Path' or 'Top 10 Rows'.")
                     st.rerun()
     st.divider()
@@ -915,7 +910,32 @@ with tab_qa:
 
     st.divider()
 
-    tab_checks, tab_manual = st.tabs(["✅ Automated Checks", "🧭 Manual Explorer"])
+    # Inner tab-stability fix (same pattern as outer tabs above)
+    _QA_TAB_LABELS = ["✅ Automated Checks", "🧭 Manual Explorer"]
+    _QA_TAB_KEYS   = ["checks", "manual"]
+
+    def _get_qa_inner_tab() -> int:
+        key = st.query_params.get(SK.TAB_QA_INNER, "checks")
+        try:
+            return _QA_TAB_KEYS.index(key)
+        except ValueError:
+            return 0
+
+    _qi1, _qi2 = st.columns(2)
+    with _qi1:
+        if st.button("✅ Automated Checks", key="qa_inner_btn_checks",
+                     type="primary" if _get_qa_inner_tab() == 0 else "secondary",
+                     use_container_width=True):
+            st.query_params[SK.TAB_QA_INNER] = "checks"
+            st.rerun()
+    with _qi2:
+        if st.button("🧭 Manual Explorer", key="qa_inner_btn_manual",
+                     type="primary" if _get_qa_inner_tab() == 1 else "secondary",
+                     use_container_width=True):
+            st.query_params[SK.TAB_QA_INNER] = "manual"
+            st.rerun()
+
+    tab_checks, tab_manual = st.tabs(_QA_TAB_LABELS)
 
     with tab_checks:
         st.markdown("#### Actions")
@@ -927,15 +947,15 @@ with tab_qa:
         btn_clear_tests = c4.button("🧹 Clear Tests", use_container_width=True, key="qa_btn_clear_tests")
 
         if btn_clear_tests:
-            st.session_state.pop("qa_tests_df", None)
+            st.session_state.pop(SK.QA_TESTS_DF, None)
             st.success("Cleared tests.")
             st.rerun()
 
         if btn_lastfile:
-            if "qa_mapping_df" not in st.session_state:
+            if SK.QA_MAPPING_DF not in st.session_state:
                 st.warning("No mapping available.")
             else:
-                df = st.session_state["qa_mapping_df"].copy()
+                df = st.session_state[SK.QA_MAPPING_DF].copy()
                 land_times, raw_times, cur_times = [], [], []
                 with st.status("Fetching latest file timestamps…", expanded=False):
                     for _, r in df.iterrows():
@@ -966,14 +986,14 @@ with tab_qa:
                 df["LandingLastFile"] = land_times
                 df["RawLastFile"] = raw_times
                 df["CuratedLastFile"] = cur_times
-                st.session_state["qa_mapping_df"] = df
+                st.session_state[SK.QA_MAPPING_DF] = df
                 st.success("Timestamps added to the mapping table above.")
 
         if btn_rawtypes:
-            if "qa_mapping_df" not in st.session_state:
+            if SK.QA_MAPPING_DF not in st.session_state:
                 st.warning("No mapping available.")
             else:
-                df = st.session_state["qa_mapping_df"]
+                df = st.session_state[SK.QA_MAPPING_DF]
                 sel = df[df["Select"] == True].copy()
                 if sel.empty:
                     st.warning("Select at least one row in the mapping table.")
@@ -1001,7 +1021,7 @@ with tab_qa:
                                     else:
                                         items = browser.list_objects(bucket=rb, prefix=pref, cap=cap_per_prefix, start_utc=start_utc, end_utc=end_utc)
 
-                                    types_here = sorted({ _coalesce_ext(it.get("Key","")) for it in items if it.get("Key") })
+                                    types_here = sorted({ extract_file_extension(it.get("Key","")) for it in items if it.get("Key") })
                                     status = "PASS" if len(types_here) <= 1 else "WARN"
                                     detail = f"default folder types: {types_here or ['(none)']}"
                                     rows.append({"Test": f"Raw Types {RAW_LAST_N_DATES}", "AppID": app, "Entity": ent, "Status": status, "Detail": detail})
@@ -1028,7 +1048,7 @@ with tab_qa:
                                         else:
                                             items = browser.list_objects(bucket=rb, prefix=pref, cap=cap_per_prefix, start_utc=start_utc, end_utc=end_utc)
 
-                                        exts = sorted({ _coalesce_ext(it.get("Key","")) for it in items if it.get("Key") })
+                                        exts = sorted({ extract_file_extension(it.get("Key","")) for it in items if it.get("Key") })
                                         types_per_date.append(exts)
 
                                     stable = len(set([",".join(x) for x in types_per_date])) == 1
@@ -1036,16 +1056,16 @@ with tab_qa:
                                     detail = f"Dates={last_dates}; Types={types_per_date}"
                                     rows.append({"Test": f"Raw Types {RAW_LAST_N_DATES}", "AppID": app, "Entity": ent, "Status": status, "Detail": detail})
 
-                    prev = st.session_state.get("qa_tests_df")
+                    prev = st.session_state.get(SK.QA_TESTS_DF)
                     df_new = pd.DataFrame(rows)
-                    st.session_state["qa_tests_df"] = pd.concat([prev, df_new], ignore_index=True) if isinstance(prev, pd.DataFrame) else df_new
+                    st.session_state[SK.QA_TESTS_DF] = pd.concat([prev, df_new], ignore_index=True) if isinstance(prev, pd.DataFrame) else df_new
                     st.success("Raw types test complete.")
 
         if btn_curatedschema:
-            if "qa_mapping_df" not in st.session_state:
+            if SK.QA_MAPPING_DF not in st.session_state:
                 st.warning("No mapping available.")
             else:
-                df = st.session_state["qa_mapping_df"]
+                df = st.session_state[SK.QA_MAPPING_DF]
                 sel = df[df["Select"] == True].copy()
                 if sel.empty:
                     st.warning("Select at least one row in the mapping table.")
@@ -1108,14 +1128,14 @@ with tab_qa:
 
                                 rows.append({"Test": f"Curated Schema {CURATED_LAST_N_BATCHES}", "AppID": app, "Entity": ent, "Status": status, "Detail": detail})
 
-                    prev = st.session_state.get("qa_tests_df")
+                    prev = st.session_state.get(SK.QA_TESTS_DF)
                     df_new = pd.DataFrame(rows)
-                    st.session_state["qa_tests_df"] = pd.concat([prev, df_new], ignore_index=True) if isinstance(prev, pd.DataFrame) else df_new
+                    st.session_state[SK.QA_TESTS_DF] = pd.concat([prev, df_new], ignore_index=True) if isinstance(prev, pd.DataFrame) else df_new
                     st.success("Curated schema test complete.")
 
         st.markdown("#### 🧾 Tests Summary")
-        if "qa_tests_df" in st.session_state:
-            st.dataframe(st.session_state["qa_tests_df"], use_container_width=True, hide_index=True)
+        if SK.QA_TESTS_DF in st.session_state:
+            st.dataframe(st.session_state[SK.QA_TESTS_DF], use_container_width=True, hide_index=True)
         else:
             st.info("No tests run yet.")
 
@@ -1125,11 +1145,11 @@ with tab_qa:
         # Default path comes from App Discovery "Test S3" or user's last input
         s3_path = st.text_input(
             "S3 path (file OR folder)",
-            value=st.session_state.get("qa_s3_path", st.session_state.get("s3_path", "")),
+            value=st.session_state.get(SK.QA_S3_PATH, st.session_state.get(SK.S3_PATH, "")),
             key="flow_qa_manual_s3_path",
             placeholder="e.g., s3://bucket/folder/ or s3://bucket/file.parquet"
         )
-        st.session_state["qa_s3_path"] = s3_path
+        st.session_state[SK.QA_S3_PATH] = s3_path
 
         # Manual explorer controls (still present; uses shared filters as default)
         mc1, mc2, mc3 = st.columns([1, 1.6, 1.4])
@@ -1158,7 +1178,7 @@ with tab_qa:
             )
             st.session_state["qa_m_time"] = m_time
 
-            default_start, default_end = _safe_dt_default_range()
+            default_start, default_end = get_default_date_range()
             m_start = st.datetime_input(
                 "Start",
                 value=st.session_state.get("qa_m_start", start_dt if enable_time_filter else default_start),
@@ -1277,49 +1297,45 @@ with tab_qa:
 
                     if not rows:
                         st.info("No files found for current filters.")
-                        st.session_state.pop("qa_scan_df", None)
+                        st.session_state.pop(SK.QA_SCAN_DF, None)
                     else:
                         df = pd.DataFrame(rows).reset_index(drop=True)
-                        st.session_state["qa_scan_df"] = df
-                        st.session_state["qa_scan_selected_rows"] = []
+                        st.session_state[SK.QA_SCAN_DF] = df
+                        st.session_state[SK.QA_SCAN_SEL_ROWS] = []
                         st.success(f"Scanned {len(df)} item(s).")
 
                 except Exception as e:
                     st.error(f"Unexpected error: {e}")
 
-        # 1-click selection for scanned files
-        if "qa_scan_df" in st.session_state:
+        # Single-click selection for scanned files
+        if SK.QA_SCAN_DF in st.session_state:
             st.markdown("#### Files (click rows to select)")
-            df_scan = st.session_state["qa_scan_df"].copy().reset_index(drop=True)
+            df_scan = st.session_state[SK.QA_SCAN_DF].copy().reset_index(drop=True)
 
+            _scan_prev = st.session_state.get(SK.QA_SCAN_SEL_ROWS, [])
             evt = st.dataframe(
                 df_scan,
                 use_container_width=True,
                 hide_index=True,
                 on_select="rerun",
                 selection_mode="multi-row",
-                key="flow_qa_scan_df"
+                key="flow_qa_scan_df",
+                default={"selection": {"rows": _scan_prev}},
             )
-            sel_rows = []
-            try:
-                if evt is not None and getattr(evt, "selection", None) is not None:
-                    sel_rows = list(evt.selection.rows or [])
-            except Exception:
-                sel_rows = st.session_state.get("qa_scan_selected_rows", [])
-
-            st.session_state["qa_scan_selected_rows"] = sel_rows
+            sel_rows = list(evt.selection.rows or []) if evt and getattr(evt, "selection", None) else _scan_prev
+            st.session_state[SK.QA_SCAN_SEL_ROWS] = sel_rows
 
             selected = df_scan.iloc[sel_rows].copy() if sel_rows else df_scan.iloc[0:0].copy()
-            st.session_state["qa_selected_df"] = selected
+            st.session_state[SK.QA_SELECTED_DF] = selected
             st.write(f"Selected **{len(selected)}** item(s).")
 
         def _first_selected_row():
-            if "qa_selected_df" not in st.session_state or len(st.session_state["qa_selected_df"]) == 0:
+            if SK.QA_SELECTED_DF not in st.session_state or len(st.session_state[SK.QA_SELECTED_DF]) == 0:
                 st.error("Select at least one file (click a row).")
                 return None
-            if len(st.session_state["qa_selected_df"]) > 1:
+            if len(st.session_state[SK.QA_SELECTED_DF]) > 1:
                 st.info("Previewing the first selected file only.")
-            return st.session_state["qa_selected_df"].iloc[0]
+            return st.session_state[SK.QA_SELECTED_DF].iloc[0]
 
         if preview_btn:
             row = _first_selected_row()
@@ -1369,10 +1385,10 @@ with tab_qa:
                             st.error(f"Column detection failed: {e}")
 
         if count_btn:
-            if "qa_selected_df" not in st.session_state or len(st.session_state["qa_selected_df"]) == 0:
+            if SK.QA_SELECTED_DF not in st.session_state or len(st.session_state[SK.QA_SELECTED_DF]) == 0:
                 st.error("Select at least one file (click a row).")
             else:
-                sel = st.session_state["qa_selected_df"]
+                sel = st.session_state[SK.QA_SELECTED_DF]
                 total = 0
                 results = []
                 with st.status(f"Counting rows for {len(sel)} file(s)...", expanded=False):
