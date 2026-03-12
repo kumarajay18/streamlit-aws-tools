@@ -894,6 +894,10 @@ with tab_qa:
                 if use_raw_btn and chosen_raw_path:
                     st.session_state[SK.QA_S3_PATH] = chosen_raw_path
                     st.session_state[SK.S3_PATH] = chosen_raw_path
+                    # Also write to the widget's own key so the text_input reflects
+                    # the new value immediately on rerun (Streamlit ignores value=
+                    # for a keyed widget once it has been rendered once).
+                    st.session_state[SK.QA_MANUAL_S3_PATH_WIDGET] = chosen_raw_path
                     st.success("Path copied to the 'S3 path' field in Manual Explorer. You can now click 'Scan Path' or 'Top 10 Rows'.")
                     st.rerun()
 
@@ -932,6 +936,9 @@ with tab_qa:
                 if use_cur_btn and chosen_cur_path:
                     st.session_state[SK.QA_S3_PATH] = chosen_cur_path
                     st.session_state[SK.S3_PATH] = chosen_cur_path
+                    # Also write to the widget's own key so the text_input reflects
+                    # the new value immediately on rerun.
+                    st.session_state[SK.QA_MANUAL_S3_PATH_WIDGET] = chosen_cur_path
                     st.success("Path copied to the 'S3 path' field in Manual Explorer. You can now click 'Scan Path' or 'Top 10 Rows'.")
                     st.rerun()
     st.divider()
@@ -1186,7 +1193,7 @@ with tab_qa:
         s3_path = st.text_input(
             "S3 path (file OR folder)",
             value=st.session_state.get(SK.QA_S3_PATH, st.session_state.get(SK.S3_PATH, "")),
-            key="flow_qa_manual_s3_path",
+            key=SK.QA_MANUAL_S3_PATH_WIDGET,
             placeholder="e.g., s3://bucket/folder/ or s3://bucket/file.parquet"
         )
         st.session_state[SK.QA_S3_PATH] = s3_path

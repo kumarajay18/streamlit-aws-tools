@@ -128,6 +128,10 @@ class SK:  # SK = Session Keys
     QA_RAW_ENTITY_PATHS_DF     = "qa_raw_entity_paths_df"
     QA_CURATED_ENTITY_PATHS_DF = "qa_curated_entity_paths_df"
     QA_S3_PATH         = "qa_s3_path"
+    # Widget key for the Manual Explorer S3 path text_input.  Must be written
+    # directly to session_state so that the text box updates on rerun when the
+    # "Use selected" buttons copy a path from the entity tables.
+    QA_MANUAL_S3_PATH_WIDGET = "flow_qa_manual_s3_path"
     QA_SCAN_DF         = "qa_scan_df"
     QA_SCAN_SEL_ROWS   = "qa_scan_selected_rows"
     QA_SELECTED_DF     = "qa_selected_df"
