@@ -45,6 +45,21 @@ qa = QAInspector(boto3_client=s3, boto3_session=mgr.get_session(), s3_endpoint_u
 # get_default_date_range() and extract_file_extension() have been moved to
 # src/core/common.py and are imported above.  All call-sites in this file now
 # use those imports directly.
+def _syd_naive_to_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """Convert a datetime to UTC, treating naive datetimes as Sydney time.
+
+    ``st.datetime_input`` returns naive datetimes whose *display* label says
+    "Sydney time", so we must attach the Sydney timezone before converting to
+    UTC.  Without this the filter window is off by +10/+11 hours and no
+    objects are returned.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=SYDNEY_TZ)
+    return dt.astimezone(timezone.utc)
+
+
 def _build_entity_paths_df(source: str) -> Optional[pd.DataFrame]:
     """
     source: 'raw' or 'curated'
@@ -392,8 +407,8 @@ with st.sidebar:
     st.session_state[SK.FLOW_START_DT] = start_dt
     st.session_state[SK.FLOW_END_DT] = end_dt
 
-    start_utc = S3Utils.to_utc(start_dt) if enable_time_filter else None
-    end_utc = S3Utils.to_utc(end_dt) if enable_time_filter else None
+    start_utc = _syd_naive_to_utc(start_dt) if enable_time_filter else None
+    end_utc = _syd_naive_to_utc(end_dt) if enable_time_filter else None
 
     st.markdown("---")
     max_items = st.number_input(
@@ -847,23 +862,34 @@ with tab_qa:
         # Show RAW entity paths table
         if SK.QA_RAW_ENTITY_PATHS_DF in st.session_state:
             df_raw_paths = st.session_state[SK.QA_RAW_ENTITY_PATHS_DF]
-            with st.expander(f"📄 RAW entity paths ({len(df_raw_paths)} rows) — click a row → 'Use selected' to fill Manual S3 Path", expanded=True):
-                _ep_raw_sel = st.session_state.get("_ep_raw_sel_row", [])
+            _ra_nrows = len(df_raw_paths)
+            with st.expander(f"📄 RAW entity paths ({_ra_nrows} rows) — select rows for checks or 'Use selected' for Manual S3 Path", expanded=True):
+                _ra1, _ra2, _ra3 = st.columns([1, 1, 4])
+                if _ra1.button("✅ Select All", key="qa_ep_raw_sel_all", use_container_width=True):
+                    st.session_state["_ep_raw_sel_row"] = list(range(_ra_nrows))
+                    st.rerun()
+                if _ra2.button("🧹 Clear", key="qa_ep_raw_clear", use_container_width=True):
+                    st.session_state["_ep_raw_sel_row"] = []
+                    st.rerun()
+
+                _ep_raw_sel = st.session_state.get("_ep_raw_sel_row", list(range(_ra_nrows)))
                 evt_raw_paths = st.dataframe(
                     df_raw_paths,
                     use_container_width=True,
                     hide_index=True,
                     on_select="rerun",
-                    selection_mode="single-row",
+                    selection_mode="multi-row",
                     key="qa_raw_entity_paths_table",
                 )
                 chosen_raw_idx: List[int] = list(evt_raw_paths.selection.rows or []) if evt_raw_paths and getattr(evt_raw_paths, "selection", None) else _ep_raw_sel
                 st.session_state["_ep_raw_sel_row"] = chosen_raw_idx
 
+                st.caption(f"Selected: {len(chosen_raw_idx)} of {_ra_nrows} entities (used by automated checks)")
+
                 chosen_raw_path = None
                 if chosen_raw_idx:
                     chosen_raw_path = df_raw_paths.iloc[chosen_raw_idx[0]]["S3 Path"]
-                    st.caption(f"Selected path: `{chosen_raw_path}`")
+                    st.caption(f"First selected path: `{chosen_raw_path}`")
                 use_raw_btn = st.button("📋 Use selected (RAW)", key="qa_use_raw_path_btn", disabled=not chosen_raw_path)
                 if use_raw_btn and chosen_raw_path:
                     st.session_state[SK.QA_S3_PATH] = chosen_raw_path
@@ -874,23 +900,34 @@ with tab_qa:
         # Show CURATED entity paths table
         if SK.QA_CURATED_ENTITY_PATHS_DF in st.session_state:
             df_cur_paths = st.session_state[SK.QA_CURATED_ENTITY_PATHS_DF]
-            with st.expander(f"🧬 CURATED entity paths ({len(df_cur_paths)} rows) — click a row → 'Use selected' to fill Manual S3 Path", expanded=True):
-                _ep_cur_sel = st.session_state.get("_ep_cur_sel_row", [])
+            _cu_nrows = len(df_cur_paths)
+            with st.expander(f"🧬 CURATED entity paths ({_cu_nrows} rows) — select rows for checks or 'Use selected' for Manual S3 Path", expanded=True):
+                _cu1, _cu2, _cu3 = st.columns([1, 1, 4])
+                if _cu1.button("✅ Select All", key="qa_ep_cur_sel_all", use_container_width=True):
+                    st.session_state["_ep_cur_sel_row"] = list(range(_cu_nrows))
+                    st.rerun()
+                if _cu2.button("🧹 Clear", key="qa_ep_cur_clear", use_container_width=True):
+                    st.session_state["_ep_cur_sel_row"] = []
+                    st.rerun()
+
+                _ep_cur_sel = st.session_state.get("_ep_cur_sel_row", list(range(_cu_nrows)))
                 evt_cur_paths = st.dataframe(
                     df_cur_paths,
                     use_container_width=True,
                     hide_index=True,
                     on_select="rerun",
-                    selection_mode="single-row",
+                    selection_mode="multi-row",
                     key="qa_cur_entity_paths_table",
                 )
                 chosen_cur_idx: List[int] = list(evt_cur_paths.selection.rows or []) if evt_cur_paths and getattr(evt_cur_paths, "selection", None) else _ep_cur_sel
                 st.session_state["_ep_cur_sel_row"] = chosen_cur_idx
 
+                st.caption(f"Selected: {len(chosen_cur_idx)} of {_cu_nrows} entities (used by automated checks)")
+
                 chosen_cur_path = None
                 if chosen_cur_idx:
                     chosen_cur_path = df_cur_paths.iloc[chosen_cur_idx[0]]["S3 Path"]
-                    st.caption(f"Selected path: `{chosen_cur_path}`")
+                    st.caption(f"First selected path: `{chosen_cur_path}`")
                 use_cur_btn = st.button("📋 Use selected (CURATED)", key="qa_use_cur_path_btn", disabled=not chosen_cur_path)
                 if use_cur_btn and chosen_cur_path:
                     st.session_state[SK.QA_S3_PATH] = chosen_cur_path
@@ -951,64 +988,72 @@ with tab_qa:
                     # Update RAW entity paths table — use S3 Path column to find true latest
                     if _has_raw_ep:
                         df_raw_ep = st.session_state[SK.QA_RAW_ENTITY_PATHS_DF].copy()
-                        last_times_raw = []
-                        for _, r in df_raw_ep.iterrows():
+                        _raw_sel = st.session_state.get("_ep_raw_sel_row", [])
+                        _raw_iter = df_raw_ep.iloc[_raw_sel] if _raw_sel else df_raw_ep
+                        if "LastFileDateTime" not in df_raw_ep.columns:
+                            df_raw_ep["LastFileDateTime"] = None
+                        for idx, r in _raw_iter.iterrows():
                             s3_path_val = (r.get("S3 Path") or "").strip()
                             if not s3_path_val:
-                                last_times_raw.append(None)
+                                df_raw_ep.at[idx, "LastFileDateTime"] = None
                                 continue
                             try:
                                 bkt, pref = S3Utils.parse_s3_path(s3_path_val)
                             except ValueError:
-                                last_times_raw.append(None)
+                                df_raw_ep.at[idx, "LastFileDateTime"] = None
                                 continue
                             latest_obj = browser.find_latest_object(bkt, pref, start_utc=start_utc, end_utc=end_utc)
                             if latest_obj and latest_obj.get("LastModified"):
                                 lt_syd = latest_obj["LastModified"].astimezone(SYDNEY_TZ)
-                                last_times_raw.append(lt_syd.strftime("%Y-%m-%d %H:%M:%S %Z"))
+                                df_raw_ep.at[idx, "LastFileDateTime"] = lt_syd.strftime("%Y-%m-%d %H:%M:%S %Z")
                             else:
-                                last_times_raw.append(None)
-                        df_raw_ep["LastFileDateTime"] = last_times_raw
+                                df_raw_ep.at[idx, "LastFileDateTime"] = None
                         st.session_state[SK.QA_RAW_ENTITY_PATHS_DF] = df_raw_ep
-                        st.write(f"✔️ Updated {len(df_raw_ep)} RAW entities")
+                        st.write(f"✔️ Updated {len(_raw_iter)} of {len(df_raw_ep)} RAW entities")
 
                     # Update CURATED entity paths table — use S3 Path column to find true latest
                     if _has_cur_ep:
                         df_cur_ep = st.session_state[SK.QA_CURATED_ENTITY_PATHS_DF].copy()
-                        last_times_cur = []
-                        for _, r in df_cur_ep.iterrows():
+                        _cur_sel = st.session_state.get("_ep_cur_sel_row", [])
+                        _cur_iter = df_cur_ep.iloc[_cur_sel] if _cur_sel else df_cur_ep
+                        if "LastFileDateTime" not in df_cur_ep.columns:
+                            df_cur_ep["LastFileDateTime"] = None
+                        for idx, r in _cur_iter.iterrows():
                             s3_path_val = (r.get("S3 Path") or "").strip()
                             if not s3_path_val:
-                                last_times_cur.append(None)
+                                df_cur_ep.at[idx, "LastFileDateTime"] = None
                                 continue
                             try:
                                 bkt, pref = S3Utils.parse_s3_path(s3_path_val)
                             except ValueError:
-                                last_times_cur.append(None)
+                                df_cur_ep.at[idx, "LastFileDateTime"] = None
                                 continue
                             latest_obj = browser.find_latest_object(bkt, pref, start_utc=start_utc, end_utc=end_utc)
                             if latest_obj and latest_obj.get("LastModified"):
                                 lt_syd = latest_obj["LastModified"].astimezone(SYDNEY_TZ)
-                                last_times_cur.append(lt_syd.strftime("%Y-%m-%d %H:%M:%S %Z"))
+                                df_cur_ep.at[idx, "LastFileDateTime"] = lt_syd.strftime("%Y-%m-%d %H:%M:%S %Z")
                             else:
-                                last_times_cur.append(None)
-                        df_cur_ep["LastFileDateTime"] = last_times_cur
+                                df_cur_ep.at[idx, "LastFileDateTime"] = None
                         st.session_state[SK.QA_CURATED_ENTITY_PATHS_DF] = df_cur_ep
-                        st.write(f"✔️ Updated {len(df_cur_ep)} CURATED entities")
+                        st.write(f"✔️ Updated {len(_cur_iter)} of {len(df_cur_ep)} CURATED entities")
                 st.rerun()
 
             # ── Raw file extension check ───────────────────────────────────────────
             if btn_rawtypes:
                 df_raw_ep = st.session_state[SK.QA_RAW_ENTITY_PATHS_DF].copy()
-                ext_statuses: List[str] = []
-                ext_details: List[str] = []
+                _raw_sel = st.session_state.get("_ep_raw_sel_row", [])
+                _raw_iter = df_raw_ep.iloc[_raw_sel] if _raw_sel else df_raw_ep
+                if "ExtCheck" not in df_raw_ep.columns:
+                    df_raw_ep["ExtCheck"] = None
+                if "ExtDetail" not in df_raw_ep.columns:
+                    df_raw_ep["ExtDetail"] = None
                 with st.status("Running raw file extension check…", expanded=False):
-                    for _, r in df_raw_ep.iterrows():
+                    for idx, r in _raw_iter.iterrows():
                         rb = (r.get("Bucket") or "").strip()
                         ent = (r.get("Entity") or "").strip()
                         if not rb or not ent:
-                            ext_statuses.append("SKIP")
-                            ext_details.append("Missing bucket or entity")
+                            df_raw_ep.at[idx, "ExtCheck"] = "SKIP"
+                            df_raw_ep.at[idx, "ExtDetail"] = "Missing bucket or entity"
                             continue
 
                         if ent == "default":
@@ -1024,16 +1069,16 @@ with tab_qa:
                                 items = browser.list_objects(bucket=rb, prefix=pref, cap=cap_per_prefix, start_utc=start_utc, end_utc=end_utc)
 
                             types_here = sorted({extract_file_extension(it.get("Key", "")) for it in items if it.get("Key")})
-                            status = "PASS" if len(types_here) <= 1 else "WARN"
-                            detail = f"default folder types: {types_here or ['(none)']}"
+                            ext_status = "PASS" if len(types_here) <= 1 else "WARN"
+                            ext_detail = f"default folder types: {types_here or ['(none)']}"
                         else:
                             base = f"entity/{ent}/"
                             last_dates = _find_last_n_dates_with_data(
                                 rb, base, RAW_LAST_N_DATES, versions_mode, include_delete_markers, start_utc, end_utc, cap_per_prefix
                             )
                             if len(last_dates) < RAW_LAST_N_DATES:
-                                status = "WARN"
-                                detail = f"Found {len(last_dates)} date(s) in range: {last_dates}"
+                                ext_status = "WARN"
+                                ext_detail = f"Found {len(last_dates)} date(s) in range: {last_dates}"
                             else:
                                 types_per_date = []
                                 for d in last_dates:
@@ -1053,40 +1098,42 @@ with tab_qa:
 
                                 if types_per_date:
                                     stable = len({",".join(x) for x in types_per_date}) == 1
-                                    status = "PASS" if (stable and len(types_per_date[0]) == 1) else ("WARN" if stable else "FAIL")
-                                    detail = f"Dates={last_dates}; Types={types_per_date}"
+                                    ext_status = "PASS" if (stable and len(types_per_date[0]) == 1) else ("WARN" if stable else "FAIL")
+                                    ext_detail = f"Dates={last_dates}; Types={types_per_date}"
                                 else:
-                                    status = "WARN"
-                                    detail = "No files found"
+                                    ext_status = "WARN"
+                                    ext_detail = "No files found"
 
-                        ext_statuses.append(status)
-                        ext_details.append(detail)
+                        df_raw_ep.at[idx, "ExtCheck"] = ext_status
+                        df_raw_ep.at[idx, "ExtDetail"] = ext_detail
 
-                df_raw_ep["ExtCheck"] = ext_statuses
-                df_raw_ep["ExtDetail"] = ext_details
                 st.session_state[SK.QA_RAW_ENTITY_PATHS_DF] = df_raw_ep
                 st.rerun()
 
             # ── Test curated schema changes ────────────────────────────────────────
             if btn_curatedschema:
                 df_cur_ep = st.session_state[SK.QA_CURATED_ENTITY_PATHS_DF].copy()
-                schema_statuses: List[str] = []
-                schema_details: List[str] = []
+                _cur_sel = st.session_state.get("_ep_cur_sel_row", [])
+                _cur_iter = df_cur_ep.iloc[_cur_sel] if _cur_sel else df_cur_ep
+                if "SchemaCheck" not in df_cur_ep.columns:
+                    df_cur_ep["SchemaCheck"] = None
+                if "SchemaDetail" not in df_cur_ep.columns:
+                    df_cur_ep["SchemaDetail"] = None
                 with st.status("Testing curated schema across last batches…", expanded=False):
-                    for _, r in df_cur_ep.iterrows():
+                    for idx, r in _cur_iter.iterrows():
                         cb = (r.get("Bucket") or "").strip()
                         ent = (r.get("Entity") or "").strip()
                         if not cb or not ent:
-                            schema_statuses.append("SKIP")
-                            schema_details.append("Missing bucket or entity")
+                            df_cur_ep.at[idx, "SchemaCheck"] = "SKIP"
+                            df_cur_ep.at[idx, "SchemaDetail"] = "Missing bucket or entity"
                             continue
 
                         batches = _find_last_n_batches_with_data(
                             cb, ent, CURATED_LAST_N_BATCHES, versions_mode, include_delete_markers, start_utc, end_utc, cap_per_prefix
                         )
                         if not batches:
-                            schema_statuses.append("WARN")
-                            schema_details.append("No batches with data in range")
+                            df_cur_ep.at[idx, "SchemaCheck"] = "WARN"
+                            df_cur_ep.at[idx, "SchemaDetail"] = "No batches with data in range"
                             continue
 
                         schemas = []
@@ -1120,17 +1167,15 @@ with tab_qa:
                             union_all = set().union(*schemas) if schemas else set()
                             added_columns = sorted(union_all - base_schema)
                             removed_columns = sorted(base_schema - union_all)
-                            detail = f"Batches={batches}; Sampled={sampled_info}; Changes → added={added_columns}, removed={removed_columns}"
-                            status = "FAIL"
+                            schema_detail = f"Batches={batches}; Sampled={sampled_info}; Changes → added={added_columns}, removed={removed_columns}"
+                            schema_status = "FAIL"
                         else:
-                            detail = f"Batches={batches}; Sampled={sampled_info}; No column changes"
-                            status = "PASS"
+                            schema_detail = f"Batches={batches}; Sampled={sampled_info}; No column changes"
+                            schema_status = "PASS"
 
-                        schema_statuses.append(status)
-                        schema_details.append(detail)
+                        df_cur_ep.at[idx, "SchemaCheck"] = schema_status
+                        df_cur_ep.at[idx, "SchemaDetail"] = schema_detail
 
-                df_cur_ep["SchemaCheck"] = schema_statuses
-                df_cur_ep["SchemaDetail"] = schema_details
                 st.session_state[SK.QA_CURATED_ENTITY_PATHS_DF] = df_cur_ep
                 st.rerun()
 
