@@ -195,6 +195,104 @@ def get_latest_event_for_function(logs_client, function_name: str) -> Tuple[Opti
     except Exception as e:
         return (None, f"Error: {e}", log_group, None)
 
+
+def fetch_last_run_logs(
+    logs_client,
+    function_name: str,
+    max_events: int = 10_000,
+) -> Tuple[Optional[str], Optional[str], List[str], Optional[datetime], Optional[datetime]]:
+    """
+    Fetch ALL log events from the most-recent CloudWatch log stream for a Lambda function.
+
+    Returns:
+        (log_group, stream_name, formatted_lines, first_event_dt, last_event_dt)
+
+    ``formatted_lines`` is a list of ``"[ISO-timestamp] message"`` strings.
+    On error the list contains a single descriptive error message and the other
+    optional fields are ``None``.
+    """
+    log_group = f"/aws/lambda/{function_name}"
+    try:
+        # 1. Find the most-recent log stream
+        resp = logs_client.describe_log_streams(
+            logGroupName=log_group,
+            orderBy="LastEventTime",
+            descending=True,
+            limit=1,
+        )
+        streams = resp.get("logStreams", [])
+        if not streams:
+            return (log_group, None, ["No log streams found — the function may never have run."], None, None)
+
+        stream = streams[0]
+        stream_name = stream.get("logStreamName")
+        if not stream_name:
+            return (log_group, None, ["Could not determine log stream name."], None, None)
+
+        def _ms_to_local(ms: Optional[int]) -> Optional[datetime]:
+            if ms is None:
+                return None
+            return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).astimezone()
+
+        stream_first_dt = _ms_to_local(stream.get("firstEventTimestamp") or stream.get("creationTime"))
+        stream_last_dt  = _ms_to_local(stream.get("lastEventTimestamp"))
+
+        # 2. Read all events from the stream (paginated)
+        lines: List[str] = []
+        next_token: Optional[str] = None
+        fetched = 0
+
+        while fetched < max_events:
+            kwargs: Dict = {
+                "logGroupName": log_group,
+                "logStreamName": stream_name,
+                "startFromHead": True,
+                "limit": min(10_000, max_events - fetched),
+            }
+            if next_token:
+                kwargs["nextToken"] = next_token
+
+            ev_resp = logs_client.get_log_events(**kwargs)
+            events = ev_resp.get("events", [])
+
+            for e in events:
+                ts = e.get("timestamp")
+                msg = (e.get("message") or "").rstrip("\n")
+                if ts:
+                    dt = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc).astimezone()
+                    lines.append(f"[{dt.isoformat(timespec='seconds')}] {msg}")
+                else:
+                    lines.append(msg)
+
+            fetched += len(events)
+            new_token = ev_resp.get("nextForwardToken")
+            # CloudWatch repeats the same token when there are no more events
+            if not new_token or new_token == next_token or not events:
+                break
+            next_token = new_token
+
+        if not lines:
+            lines = ["(Stream exists but contains no log events.)"]
+
+        return (log_group, stream_name, lines, stream_first_dt, stream_last_dt)
+
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code")
+        if code == "ResourceNotFoundException":
+            return (log_group, None,
+                    [f"Log group `{log_group}` not found — the function may never have run."],
+                    None, None)
+        if code in ("AccessDeniedException", "AccessDenied"):
+            return (log_group, None,
+                    ["⚠️ AccessDenied: you need logs:DescribeLogStreams and logs:GetLogEvents on the log group."],
+                    None, None)
+        return (log_group, None, [f"⚠️ AWS error ({code}): {e}"], None, None)
+    except BotoCoreError as e:
+        return (log_group, None, [f"⚠️ Boto core error: {e}"], None, None)
+    except Exception as e:
+        return (log_group, None, [f"⚠️ Unexpected error: {e}"], None, None)
+
+
 # Manual search helpers
 def _tokenize_filter(text: str) -> List[str]:
     return [t for t in re.split(r"[,\s]+", (text or "").strip()) if t]
@@ -417,15 +515,54 @@ st.markdown("---")
 fn_name = st.selectbox("Select a Lambda for detailed actions", selected_lambdas, index=0)
 st.markdown(f"🔗 Console: https://{DEFAULT_REGION}.console.aws.amazon.com/lambda/home?region={DEFAULT_REGION}#/functions/{fn_name}?tab=configuration")
 
-# Single Lambda - quick latest check
-st.markdown("### ⏱️ Check Last Run (Selected Lambda)")
-if st.button("Check latest log event time (selected Lambda)"):
-    dt_local, msg, log_group, stream_name = get_latest_event_for_function(logs_client, fn_name)
-    if dt_local:
-        st.success(f"Latest event at: **{dt_local.isoformat(timespec='seconds')}**")
-        st.code(msg or "", language="text")
-    else:
-        st.info(msg or "No log events found in the last 30 days.")
+# Single Lambda - fetch & display full last-run logs
+st.markdown("### 📋 Last Run Logs (Selected Lambda)")
+col_fetch_log, col_clear_log = st.columns([1, 1])
+with col_fetch_log:
+    btn_fetch_last_log = st.button("🪵 Fetch Last Run Logs", type="primary", width='stretch')
+with col_clear_log:
+    if st.button("🗑️ Clear Log", width='stretch'):
+        st.session_state.pop("lambda_last_run_log", None)
+        st.rerun()
+
+if btn_fetch_last_log:
+    with st.spinner(f"Fetching last run logs for **{fn_name}** …"):
+        log_group, stream_name, log_lines, first_dt, last_dt = fetch_last_run_logs(logs_client, fn_name)
+    st.session_state["lambda_last_run_log"] = {
+        "fn_name": fn_name,
+        "log_group": log_group,
+        "stream_name": stream_name,
+        "log_lines": log_lines,
+        "first_dt": first_dt.isoformat(timespec="seconds") if first_dt else None,
+        "last_dt": last_dt.isoformat(timespec="seconds") if last_dt else None,
+    }
+
+if "lambda_last_run_log" in st.session_state:
+    cached = st.session_state["lambda_last_run_log"]
+    if cached["fn_name"] != fn_name:
+        st.info("ℹ️ Log shown below is for a different function. Click **Fetch Last Run Logs** to refresh.")
+    stream_name_cached = cached.get("stream_name")
+    log_lines_cached: List[str] = cached.get("log_lines", [])
+    first_dt_str = cached.get("first_dt")
+    last_dt_str  = cached.get("last_dt")
+
+    if stream_name_cached:
+        st.caption(
+            f"**Log group:** `{cached.get('log_group')}`  \n"
+            f"**Stream:** `{stream_name_cached}`  \n"
+            f"**Start:** {first_dt_str or '—'}  |  **End:** {last_dt_str or '—'}  |  "
+            f"**Lines:** {len(log_lines_cached)}"
+        )
+    with st.expander("📜 Log output", expanded=True):
+        st.code("\n".join(log_lines_cached), language="text")
+    if stream_name_cached and log_lines_cached:
+        st.download_button(
+            label="⬇️ Download logs (.txt)",
+            data="\n".join(log_lines_cached).encode("utf-8"),
+            file_name=f"{fn_name}_last_run.txt",
+            mime="text/plain",
+            width='stretch',
+        )
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Env Variables

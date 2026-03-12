@@ -499,7 +499,6 @@ with tab_analyse:
             on_select="rerun",
             selection_mode="multi-row",
             key="flow_map_df",
-            default={"selection": {"rows": sel_rows}},
         )
         chosen_rows = list(evt_map.selection.rows or []) if evt_map and getattr(evt_map, "selection", None) else sel_rows
         st.session_state[SK.FLOW_MAP_SELECTED] = chosen_rows
@@ -642,7 +641,6 @@ with tab_analyse:
                 on_select="rerun",
                 selection_mode="multi-row",
                 key=f"flow_tbl_{bucket}",
-                default={"selection": {"rows": _prev_sel}},
             )
             sel_rows = list(evt.selection.rows or []) if evt and getattr(evt, "selection", None) else _prev_sel
             st.session_state[_sel_key] = sel_rows
@@ -822,7 +820,6 @@ with tab_qa:
             on_select="rerun",
             selection_mode="multi-row",
             key="qa_map_df",
-            default={"selection": {"rows": sel_rows}},
         )
         chosen = list(evt.selection.rows or []) if evt and getattr(evt, "selection", None) else sel_rows
         st.session_state[SK.QA_MAP_SELECTED] = chosen
@@ -881,7 +878,6 @@ with tab_qa:
                     on_select="rerun",
                     selection_mode="single-row",
                     key="qa_entity_paths_table",
-                    default={"selection": {"rows": _ep_sel}},
                 )
                 chosen_row_idx: List[int] = list(evt_paths.selection.rows or []) if evt_paths and getattr(evt_paths, "selection", None) else _ep_sel
                 st.session_state["_ep_sel_row"] = chosen_row_idx
@@ -1320,7 +1316,6 @@ with tab_qa:
                 on_select="rerun",
                 selection_mode="multi-row",
                 key="flow_qa_scan_df",
-                default={"selection": {"rows": _scan_prev}},
             )
             sel_rows = list(evt.selection.rows or []) if evt and getattr(evt, "selection", None) else _scan_prev
             st.session_state[SK.QA_SCAN_SEL_ROWS] = sel_rows
