@@ -947,52 +947,55 @@ with tab_qa:
 
             # ── Fetch Last File Date/Time ──────────────────────────────────────────
             if btn_lastfile:
-                with st.status("Fetching latest file timestamps…", expanded=False):
-                    # Update RAW entity paths table
+                with st.status("Fetching latest file timestamps…", expanded=True):
+                    # Update RAW entity paths table — use S3 Path column to find true latest
                     if _has_raw_ep:
                         df_raw_ep = st.session_state[SK.QA_RAW_ENTITY_PATHS_DF].copy()
                         last_times_raw = []
                         for _, r in df_raw_ep.iterrows():
-                            bkt = (r.get("Bucket") or "").strip()
-                            ent = (r.get("Entity") or "").strip()
-                            if not bkt or not ent:
+                            s3_path_val = (r.get("S3 Path") or "").strip()
+                            if not s3_path_val:
                                 last_times_raw.append(None)
                                 continue
-                            pref = f"entity/{ent}/"
-                            lt = _latest_object_time_filtered(bkt, pref, versions_mode, include_delete_markers, start_utc, end_utc, cap_per_prefix)
-                            if not lt:
-                                lt = _latest_object_time_filtered(bkt, "", versions_mode, include_delete_markers, start_utc, end_utc, cap_per_prefix)
-                            if lt:
-                                lt_syd = lt.astimezone(SYDNEY_TZ)
+                            try:
+                                bkt, pref = S3Utils.parse_s3_path(s3_path_val)
+                            except ValueError:
+                                last_times_raw.append(None)
+                                continue
+                            latest_obj = browser.find_latest_object(bkt, pref, start_utc=start_utc, end_utc=end_utc)
+                            if latest_obj and latest_obj.get("LastModified"):
+                                lt_syd = latest_obj["LastModified"].astimezone(SYDNEY_TZ)
                                 last_times_raw.append(lt_syd.strftime("%Y-%m-%d %H:%M:%S %Z"))
                             else:
                                 last_times_raw.append(None)
                         df_raw_ep["LastFileDateTime"] = last_times_raw
                         st.session_state[SK.QA_RAW_ENTITY_PATHS_DF] = df_raw_ep
+                        st.write(f"✔️ Updated {len(df_raw_ep)} RAW entities")
 
-                    # Update CURATED entity paths table
+                    # Update CURATED entity paths table — use S3 Path column to find true latest
                     if _has_cur_ep:
                         df_cur_ep = st.session_state[SK.QA_CURATED_ENTITY_PATHS_DF].copy()
                         last_times_cur = []
                         for _, r in df_cur_ep.iterrows():
-                            bkt = (r.get("Bucket") or "").strip()
-                            ent = (r.get("Entity") or "").strip()
-                            if not bkt or not ent:
+                            s3_path_val = (r.get("S3 Path") or "").strip()
+                            if not s3_path_val:
                                 last_times_cur.append(None)
                                 continue
-                            pref = f"{ent}/"
-                            lt = _latest_object_time_filtered(bkt, pref, versions_mode, include_delete_markers, start_utc, end_utc, cap_per_prefix)
-                            if not lt:
-                                lt = _latest_object_time_filtered(bkt, "", versions_mode, include_delete_markers, start_utc, end_utc, cap_per_prefix)
-                            if lt:
-                                lt_syd = lt.astimezone(SYDNEY_TZ)
+                            try:
+                                bkt, pref = S3Utils.parse_s3_path(s3_path_val)
+                            except ValueError:
+                                last_times_cur.append(None)
+                                continue
+                            latest_obj = browser.find_latest_object(bkt, pref, start_utc=start_utc, end_utc=end_utc)
+                            if latest_obj and latest_obj.get("LastModified"):
+                                lt_syd = latest_obj["LastModified"].astimezone(SYDNEY_TZ)
                                 last_times_cur.append(lt_syd.strftime("%Y-%m-%d %H:%M:%S %Z"))
                             else:
                                 last_times_cur.append(None)
                         df_cur_ep["LastFileDateTime"] = last_times_cur
                         st.session_state[SK.QA_CURATED_ENTITY_PATHS_DF] = df_cur_ep
-
-                st.success("LastFileDateTime column updated in entity tables above.")
+                        st.write(f"✔️ Updated {len(df_cur_ep)} CURATED entities")
+                st.rerun()
 
             # ── Raw file extension check ───────────────────────────────────────────
             if btn_rawtypes:
@@ -1062,7 +1065,7 @@ with tab_qa:
                 df_raw_ep["ExtCheck"] = ext_statuses
                 df_raw_ep["ExtDetail"] = ext_details
                 st.session_state[SK.QA_RAW_ENTITY_PATHS_DF] = df_raw_ep
-                st.success("Raw file extension check complete — results added to RAW entity table above.")
+                st.rerun()
 
             # ── Test curated schema changes ────────────────────────────────────────
             if btn_curatedschema:
@@ -1129,16 +1132,7 @@ with tab_qa:
                 df_cur_ep["SchemaCheck"] = schema_statuses
                 df_cur_ep["SchemaDetail"] = schema_details
                 st.session_state[SK.QA_CURATED_ENTITY_PATHS_DF] = df_cur_ep
-                st.success("Curated schema change test complete — results added to CURATED entity table above.")
-
-            # ── Show updated entity tables ─────────────────────────────────────────
-            st.markdown("#### 📋 Entity Tables with Test Results")
-            if _has_raw_ep:
-                st.markdown("**RAW entities**")
-                st.dataframe(st.session_state[SK.QA_RAW_ENTITY_PATHS_DF], use_container_width=True, hide_index=True)
-            if _has_cur_ep:
-                st.markdown("**CURATED entities**")
-                st.dataframe(st.session_state[SK.QA_CURATED_ENTITY_PATHS_DF], use_container_width=True, hide_index=True)
+                st.rerun()
 
     with tab_manual:
         st.markdown("#### S3 Dataset / File")
