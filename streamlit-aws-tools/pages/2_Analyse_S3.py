@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -12,7 +13,7 @@ from botocore.exceptions import ClientError, BotoCoreError
 
 from src.aws_s3 import get_manager
 from src.config import QA_LIST_CAP, RAW_LAST_N_DATES, CURATED_LAST_N_BATCHES, SK
-from src.core.common import S3Utils, get_default_date_range, extract_file_extension
+from src.core.common import S3Utils, get_default_date_range, extract_file_extension, SYDNEY_TZ
 from src.core.s3_browser import S3Browser
 from src.core.s3_downloader import S3Downloader
 from src.core.s3_deleter import S3Deleter
@@ -44,6 +45,21 @@ qa = QAInspector(boto3_client=s3, boto3_session=mgr.get_session(), s3_endpoint_u
 # get_default_date_range() and extract_file_extension() have been moved to
 # src/core/common.py and are imported above.  All call-sites in this file now
 # use those imports directly.
+def _syd_naive_to_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """Convert a datetime to UTC, treating naive datetimes as Sydney time.
+
+    ``st.datetime_input`` returns naive datetimes whose *display* label says
+    "Sydney time", so we must attach the Sydney timezone before converting to
+    UTC.  Without this the filter window is off by +10/+11 hours and no
+    objects are returned.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=SYDNEY_TZ)
+    return dt.astimezone(timezone.utc)
+
+
 def _build_entity_paths_df(source: str) -> Optional[pd.DataFrame]:
     """
     source: 'raw' or 'curated'
@@ -348,9 +364,16 @@ with st.sidebar:
 
     # Prefix
     prefix_all = st.text_input(
-        "Prefix (applies to listings)",
+        "Prefix / pattern (applies to listings)",
         value=st.session_state.get(SK.FLOW_PREFIX, ""),
-        placeholder="e.g., entity/ or folder/subfolder/"
+        placeholder="e.g., entity/flight or entity/flight.*\\.parquet",
+        help=(
+            "Supports regex patterns. The longest literal leading portion is used as the S3 "
+            "API prefix for an efficient server-side scan; the full pattern is then applied "
+            "client-side with `re.search`. "
+            "Examples: `entity/flight` matches `entity/flight/`, `entity/flightoperations/`, etc. "
+            "`entity/flight.*\\.parquet` matches only parquet files under any entity/flight… path."
+        ),
     )
     st.session_state[SK.FLOW_PREFIX] = prefix_all
 
@@ -370,7 +393,7 @@ with st.sidebar:
     st.session_state[SK.FLOW_DEL_MARKERS] = include_delete_markers
 
     # Time range
-    st.markdown("### Time filter")
+    st.markdown("### Time filter (Sydney time)")
     enable_time_filter = st.checkbox(
         "Enable datetime range",
         value=st.session_state.get(SK.FLOW_TIME_ENABLED, False)
@@ -379,20 +402,20 @@ with st.sidebar:
 
     default_start, default_end = get_default_date_range()
     start_dt = st.datetime_input(
-        "Start",
+        "Start (Sydney time)",
         value=st.session_state.get(SK.FLOW_START_DT, default_start),
         disabled=not enable_time_filter
     )
     end_dt = st.datetime_input(
-        "End",
+        "End (Sydney time)",
         value=st.session_state.get(SK.FLOW_END_DT, default_end),
         disabled=not enable_time_filter
     )
     st.session_state[SK.FLOW_START_DT] = start_dt
     st.session_state[SK.FLOW_END_DT] = end_dt
 
-    start_utc = S3Utils.to_utc(start_dt) if enable_time_filter else None
-    end_utc = S3Utils.to_utc(end_dt) if enable_time_filter else None
+    start_utc = _syd_naive_to_utc(start_dt) if enable_time_filter else None
+    end_utc = _syd_naive_to_utc(end_dt) if enable_time_filter else None
 
     st.markdown("---")
     max_items = st.number_input(
@@ -419,38 +442,8 @@ with st.sidebar:
 # ──────────────────────────────────────────────────────────────────────────────
 # Tabs: Analyse | QA
 # ──────────────────────────────────────────────────────────────────────────────
-# Tab-stability fix: Streamlit always renders tab-0 as active after st.rerun().
-# We persist the user's last-clicked tab in query_params so that after any
-# button-triggered rerun the correct tab stays visible.
 _TAB_LABELS = ["📦 Analyse S3", "🧪 ETL QA Tools"]
 _TAB_KEYS   = ["analyse", "qa"]
-
-def _get_active_tab() -> int:
-    """Return the index of the currently active outer tab (0 or 1)."""
-    key = st.query_params.get(SK.TAB_ANALYSE_S3, "analyse")
-    try:
-        return _TAB_KEYS.index(key)
-    except ValueError:
-        return 0
-
-def _set_active_tab(idx: int) -> None:
-    st.query_params[SK.TAB_ANALYSE_S3] = _TAB_KEYS[idx]
-
-# Render a row of tab-selector buttons ABOVE st.tabs so the user can jump
-# back to the right tab after any button-triggered rerun.
-_tc1, _tc2 = st.columns(2)
-with _tc1:
-    if st.button("📦 Analyse S3", key="outer_tab_btn_analyse",
-                 type="primary" if _get_active_tab() == 0 else "secondary",
-                 use_container_width=True):
-        _set_active_tab(0)
-        st.rerun()
-with _tc2:
-    if st.button("🧪 ETL QA Tools", key="outer_tab_btn_qa",
-                 type="primary" if _get_active_tab() == 1 else "secondary",
-                 use_container_width=True):
-        _set_active_tab(1)
-        st.rerun()
 
 tab_analyse, tab_qa = st.tabs(_TAB_LABELS)
 
@@ -608,7 +601,9 @@ with tab_analyse:
         bucket_type = payload.get("bucket_type", "Buckets")
 
         if enable_time_filter:
-            st.info(f"Filtered LastModified between **{start_utc}** and **{end_utc}** (UTC).")
+            start_syd = start_utc.astimezone(SYDNEY_TZ) if start_utc else None
+            end_syd = end_utc.astimezone(SYDNEY_TZ) if end_utc else None
+            st.info(f"Filtered LastModified between **{start_syd}** and **{end_syd}** (Sydney time).")
 
         st.markdown(f"### Results — {_fmt_bucket_type_label(bucket_type)} Buckets")
         st.caption(f"Prefix: `{prefix_all or ''}` | Versions: `{versions_mode}` | Delete markers: `{include_delete_markers}`")
@@ -629,6 +624,18 @@ with tab_analyse:
                 if c in df.columns:
                     display_cols.append(c)
             view_df = df[display_cols].copy().reset_index(drop=True)
+
+            # Convert LastModified (UTC) to Sydney time for display
+            if "LastModified" in view_df.columns:
+                view_df["LastModified (Sydney)"] = view_df["LastModified"].apply(
+                    lambda x: x.astimezone(SYDNEY_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+                    if pd.notna(x) and hasattr(x, "astimezone") else ""
+                )
+                # Replace the raw UTC column with the Sydney-time string so the
+                # table only shows one timestamp column (no confusing UTC column).
+                lm_idx = view_df.columns.get_loc("LastModified")
+                view_df.insert(lm_idx, "LastModified (Sydney)", view_df.pop("LastModified (Sydney)"))
+                view_df = view_df.drop(columns=["LastModified"])
 
             # Single-click fix: restore previous selection via `default`
             _sel_key = f"flow_selrows_{bucket}"
@@ -831,7 +838,7 @@ with tab_qa:
         # persist
         st.session_state[SK.QA_MAPPING_DF] = df_map
     # ──────────────────────────────────────────────────────────────────────────
-        # NEW: Entity Path Helpers (RAW & CURATED)
+        # Entity Path Helpers (RAW & CURATED)
         # Lists entity paths so you can copy/paste OR send directly into Manual explorer
         # ──────────────────────────────────────────────────────────────────────────
         st.markdown("#### 🧭 Entity Path Helpers")
@@ -854,44 +861,104 @@ with tab_qa:
         )
 
         if btn_clear_entities:
-            st.session_state.pop(SK.QA_ENTITY_PATHS_DF, None)
-            st.session_state.pop("_ep_sel_row", None)
+            st.session_state.pop(SK.QA_RAW_ENTITY_PATHS_DF, None)
+            st.session_state.pop(SK.QA_CURATED_ENTITY_PATHS_DF, None)
+            st.session_state.pop("_ep_raw_sel_row", None)
+            st.session_state.pop("_ep_cur_sel_row", None)
             st.success("Cleared entity paths.")
             st.rerun()
 
-
         if btn_list_raw_entities:
-            st.session_state[SK.QA_ENTITY_PATHS_DF] = _build_entity_paths_df("raw")
+            df_raw_ep = _build_entity_paths_df("raw")
+            if df_raw_ep is not None:
+                st.session_state[SK.QA_RAW_ENTITY_PATHS_DF] = df_raw_ep
 
         if btn_list_cur_entities:
-            st.session_state[SK.QA_ENTITY_PATHS_DF] = _build_entity_paths_df("curated")
+            df_cur_ep = _build_entity_paths_df("curated")
+            if df_cur_ep is not None:
+                st.session_state[SK.QA_CURATED_ENTITY_PATHS_DF] = df_cur_ep
 
-        # Show entity paths (and allow sending one into the Manual explorer input)
-        if SK.QA_ENTITY_PATHS_DF in st.session_state:
-            df_paths = st.session_state[SK.QA_ENTITY_PATHS_DF]
-            with st.expander("Entity paths (click a row → then 'Use selected' to fill Manual S3 Path)", expanded=True):
-                _ep_sel = st.session_state.get("_ep_sel_row", [])
-                evt_paths = st.dataframe(
-                    df_paths,
+        # Show RAW entity paths table
+        if SK.QA_RAW_ENTITY_PATHS_DF in st.session_state:
+            df_raw_paths = st.session_state[SK.QA_RAW_ENTITY_PATHS_DF]
+            _ra_nrows = len(df_raw_paths)
+            with st.expander(f"📄 RAW entity paths ({_ra_nrows} rows) — select rows for checks or 'Use selected' for Manual S3 Path", expanded=True):
+                _ra1, _ra2, _ra3 = st.columns([1, 1, 4])
+                if _ra1.button("✅ Select All", key="qa_ep_raw_sel_all", use_container_width=True):
+                    st.session_state["_ep_raw_sel_row"] = list(range(_ra_nrows))
+                    st.rerun()
+                if _ra2.button("🧹 Clear", key="qa_ep_raw_clear", use_container_width=True):
+                    st.session_state["_ep_raw_sel_row"] = []
+                    st.rerun()
+
+                _ep_raw_sel = st.session_state.get("_ep_raw_sel_row", list(range(_ra_nrows)))
+                evt_raw_paths = st.dataframe(
+                    df_raw_paths,
                     use_container_width=True,
                     hide_index=True,
                     on_select="rerun",
-                    selection_mode="single-row",
-                    key="qa_entity_paths_table",
+                    selection_mode="multi-row",
+                    key="qa_raw_entity_paths_table",
                 )
-                chosen_row_idx: List[int] = list(evt_paths.selection.rows or []) if evt_paths and getattr(evt_paths, "selection", None) else _ep_sel
-                st.session_state["_ep_sel_row"] = chosen_row_idx
+                chosen_raw_idx: List[int] = list(evt_raw_paths.selection.rows or []) if evt_raw_paths and getattr(evt_raw_paths, "selection", None) else _ep_raw_sel
+                st.session_state["_ep_raw_sel_row"] = chosen_raw_idx
 
-                chosen_path = None
-                if chosen_row_idx:
-                    chosen_path = df_paths.iloc[chosen_row_idx[0]]["S3 Path"]
-                    st.caption(f"Selected path: `{chosen_path}`")
-                if use_btn and chosen_path:
-                    # Push selection into the Manual Explorer's input
-                    st.session_state[SK.QA_S3_PATH] = chosen_path
-                    # Also reflect to the common key you use elsewhere if present
-                    st.session_state[SK.S3_PATH] = chosen_path
-                    st.success("Path copied to the 'S3 path' field in Manual Explorer below. You can now click 'Scan Path' or 'Top 10 Rows'.")
+                st.caption(f"Selected: {len(chosen_raw_idx)} of {_ra_nrows} entities (used by automated checks)")
+
+                chosen_raw_path = None
+                if chosen_raw_idx:
+                    chosen_raw_path = df_raw_paths.iloc[chosen_raw_idx[0]]["S3 Path"]
+                    st.caption(f"First selected path: `{chosen_raw_path}`")
+                use_raw_btn = st.button("📋 Use selected (RAW)", key="qa_use_raw_path_btn", disabled=not chosen_raw_path)
+                if use_raw_btn and chosen_raw_path:
+                    st.session_state[SK.QA_S3_PATH] = chosen_raw_path
+                    st.session_state[SK.S3_PATH] = chosen_raw_path
+                    # Also write to the widget's own key so the text_input reflects
+                    # the new value immediately on rerun (Streamlit ignores value=
+                    # for a keyed widget once it has been rendered once).
+                    st.session_state[SK.QA_MANUAL_S3_PATH_WIDGET] = chosen_raw_path
+                    st.success("Path copied to the 'S3 path' field in Manual Explorer. You can now click 'Scan Path' or 'Top 10 Rows'.")
+                    st.rerun()
+
+        # Show CURATED entity paths table
+        if SK.QA_CURATED_ENTITY_PATHS_DF in st.session_state:
+            df_cur_paths = st.session_state[SK.QA_CURATED_ENTITY_PATHS_DF]
+            _cu_nrows = len(df_cur_paths)
+            with st.expander(f"🧬 CURATED entity paths ({_cu_nrows} rows) — select rows for checks or 'Use selected' for Manual S3 Path", expanded=True):
+                _cu1, _cu2, _cu3 = st.columns([1, 1, 4])
+                if _cu1.button("✅ Select All", key="qa_ep_cur_sel_all", use_container_width=True):
+                    st.session_state["_ep_cur_sel_row"] = list(range(_cu_nrows))
+                    st.rerun()
+                if _cu2.button("🧹 Clear", key="qa_ep_cur_clear", use_container_width=True):
+                    st.session_state["_ep_cur_sel_row"] = []
+                    st.rerun()
+
+                _ep_cur_sel = st.session_state.get("_ep_cur_sel_row", list(range(_cu_nrows)))
+                evt_cur_paths = st.dataframe(
+                    df_cur_paths,
+                    use_container_width=True,
+                    hide_index=True,
+                    on_select="rerun",
+                    selection_mode="multi-row",
+                    key="qa_cur_entity_paths_table",
+                )
+                chosen_cur_idx: List[int] = list(evt_cur_paths.selection.rows or []) if evt_cur_paths and getattr(evt_cur_paths, "selection", None) else _ep_cur_sel
+                st.session_state["_ep_cur_sel_row"] = chosen_cur_idx
+
+                st.caption(f"Selected: {len(chosen_cur_idx)} of {_cu_nrows} entities (used by automated checks)")
+
+                chosen_cur_path = None
+                if chosen_cur_idx:
+                    chosen_cur_path = df_cur_paths.iloc[chosen_cur_idx[0]]["S3 Path"]
+                    st.caption(f"First selected path: `{chosen_cur_path}`")
+                use_cur_btn = st.button("📋 Use selected (CURATED)", key="qa_use_cur_path_btn", disabled=not chosen_cur_path)
+                if use_cur_btn and chosen_cur_path:
+                    st.session_state[SK.QA_S3_PATH] = chosen_cur_path
+                    st.session_state[SK.S3_PATH] = chosen_cur_path
+                    # Also write to the widget's own key so the text_input reflects
+                    # the new value immediately on rerun.
+                    st.session_state[SK.QA_MANUAL_S3_PATH_WIDGET] = chosen_cur_path
+                    st.success("Path copied to the 'S3 path' field in Manual Explorer. You can now click 'Scan Path' or 'Top 10 Rows'.")
                     st.rerun()
     st.divider()
 
@@ -902,111 +969,146 @@ with tab_qa:
         f"Time filter: **{enable_time_filter}**  | Cap per prefix: **{cap_per_prefix}**"
     )
     if enable_time_filter:
-        st.caption(f"Time range (UTC): {start_utc} → {end_utc}")
+        start_syd = start_utc.astimezone(SYDNEY_TZ) if start_utc else None
+        end_syd = end_utc.astimezone(SYDNEY_TZ) if end_utc else None
+        st.caption(f"Time range (Sydney): {start_syd} → {end_syd}")
 
     st.divider()
 
-    # Inner tab-stability fix (same pattern as outer tabs above)
+    # Inner QA tabs
     _QA_TAB_LABELS = ["✅ Automated Checks", "🧭 Manual Explorer"]
-    _QA_TAB_KEYS   = ["checks", "manual"]
-
-    def _get_qa_inner_tab() -> int:
-        key = st.query_params.get(SK.TAB_QA_INNER, "checks")
-        try:
-            return _QA_TAB_KEYS.index(key)
-        except ValueError:
-            return 0
-
-    _qi1, _qi2 = st.columns(2)
-    with _qi1:
-        if st.button("✅ Automated Checks", key="qa_inner_btn_checks",
-                     type="primary" if _get_qa_inner_tab() == 0 else "secondary",
-                     use_container_width=True):
-            st.query_params[SK.TAB_QA_INNER] = "checks"
-            st.rerun()
-    with _qi2:
-        if st.button("🧭 Manual Explorer", key="qa_inner_btn_manual",
-                     type="primary" if _get_qa_inner_tab() == 1 else "secondary",
-                     use_container_width=True):
-            st.query_params[SK.TAB_QA_INNER] = "manual"
-            st.rerun()
 
     tab_checks, tab_manual = st.tabs(_QA_TAB_LABELS)
 
     with tab_checks:
-        st.markdown("#### Actions")
-        c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+        _has_raw_ep = SK.QA_RAW_ENTITY_PATHS_DF in st.session_state
+        _has_cur_ep = SK.QA_CURATED_ENTITY_PATHS_DF in st.session_state
+        _has_any_ep = _has_raw_ep or _has_cur_ep
 
-        btn_lastfile = c1.button("⏱️ Fetch Last File Date/Time", type="primary", use_container_width=True, key="qa_btn_lastfile")
-        btn_rawtypes = c2.button(f"📄 Test Raw (last {RAW_LAST_N_DATES} dates)", use_container_width=True, key="qa_btn_rawtypes")
-        btn_curatedschema = c3.button(f"🧬 Test Curated (last {CURATED_LAST_N_BATCHES} batches)", use_container_width=True, key="qa_btn_curatedschema")
-        btn_clear_tests = c4.button("🧹 Clear Tests", use_container_width=True, key="qa_btn_clear_tests")
+        if not _has_any_ep:
+            st.info("List RAW and/or CURATED entity paths above to enable automated checks.")
+        else:
+            st.markdown("#### Actions")
+            c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
 
-        if btn_clear_tests:
-            st.session_state.pop(SK.QA_TESTS_DF, None)
-            st.success("Cleared tests.")
-            st.rerun()
+            btn_lastfile = c1.button("⏱️ Fetch Last File Date/Time", type="primary", use_container_width=True, key="qa_btn_lastfile")
+            btn_rawtypes = c2.button(f"📄 Raw file extension check (last {RAW_LAST_N_DATES} dates)", use_container_width=True, key="qa_btn_rawtypes", disabled=not _has_raw_ep)
+            btn_curatedschema = c3.button(f"🧬 Test curated schema changes (last {CURATED_LAST_N_BATCHES} batches)", use_container_width=True, key="qa_btn_curatedschema", disabled=not _has_cur_ep)
+            btn_clear_tests = c4.button("🧹 Clear Test Results", use_container_width=True, key="qa_btn_clear_tests")
 
-        if btn_lastfile:
-            if SK.QA_MAPPING_DF not in st.session_state:
-                st.warning("No mapping available.")
-            else:
-                df = st.session_state[SK.QA_MAPPING_DF].copy()
-                land_times, raw_times, cur_times = [], [], []
-                with st.status("Fetching latest file timestamps…", expanded=False):
-                    for _, r in df.iterrows():
-                        if r.get("Select") is not True:
-                            land_times.append(None); raw_times.append(None); cur_times.append(None)
+            if btn_clear_tests:
+                # Remove result columns from entity path tables
+                for _sk in (SK.QA_RAW_ENTITY_PATHS_DF, SK.QA_CURATED_ENTITY_PATHS_DF):
+                    if _sk in st.session_state and isinstance(st.session_state[_sk], pd.DataFrame):
+                        _df_c = st.session_state[_sk]
+                        for _col in ["LastFileDateTime", "ExtCheck", "ExtDetail", "SchemaCheck", "SchemaDetail"]:
+                            if _col in _df_c.columns:
+                                _df_c = _df_c.drop(columns=[_col])
+                        st.session_state[_sk] = _df_c
+                st.success("Cleared test result columns from entity tables.")
+                st.rerun()
+
+            # ── Fetch Last File Date/Time ──────────────────────────────────────────
+            if btn_lastfile:
+                with st.status("Fetching latest file timestamps…", expanded=True):
+                    # Update RAW entity paths table — use S3 Path column to find true latest
+                    if _has_raw_ep:
+                        df_raw_ep = st.session_state[SK.QA_RAW_ENTITY_PATHS_DF].copy()
+                        _raw_sel = st.session_state.get("_ep_raw_sel_row", [])
+                        _raw_iter = df_raw_ep.iloc[_raw_sel] if _raw_sel else df_raw_ep
+                        if "LastFileDateTime" not in df_raw_ep.columns:
+                            df_raw_ep["LastFileDateTime"] = None
+                        for idx, r in _raw_iter.iterrows():
+                            s3_path_val = (r.get("S3 Path") or "").strip()
+                            if not s3_path_val:
+                                df_raw_ep.at[idx, "LastFileDateTime"] = None
+                                continue
+                            try:
+                                bkt, pref = S3Utils.parse_s3_path(s3_path_val)
+                            except ValueError:
+                                df_raw_ep.at[idx, "LastFileDateTime"] = None
+                                continue
+                            latest_obj = browser.find_latest_object(bkt, pref, start_utc=start_utc, end_utc=end_utc)
+                            if latest_obj and latest_obj.get("LastModified"):
+                                lt_syd = latest_obj["LastModified"].astimezone(SYDNEY_TZ)
+                                df_raw_ep.at[idx, "LastFileDateTime"] = lt_syd.strftime("%Y-%m-%d %H:%M:%S %Z")
+                            else:
+                                df_raw_ep.at[idx, "LastFileDateTime"] = None
+                        st.session_state[SK.QA_RAW_ENTITY_PATHS_DF] = df_raw_ep
+                        st.write(f"✔️ Updated {len(_raw_iter)} of {len(df_raw_ep)} RAW entities")
+
+                    # Update CURATED entity paths table — use S3 Path column to find true latest
+                    if _has_cur_ep:
+                        df_cur_ep = st.session_state[SK.QA_CURATED_ENTITY_PATHS_DF].copy()
+                        _cur_sel = st.session_state.get("_ep_cur_sel_row", [])
+                        _cur_iter = df_cur_ep.iloc[_cur_sel] if _cur_sel else df_cur_ep
+                        if "LastFileDateTime" not in df_cur_ep.columns:
+                            df_cur_ep["LastFileDateTime"] = None
+                        for idx, r in _cur_iter.iterrows():
+                            s3_path_val = (r.get("S3 Path") or "").strip()
+                            if not s3_path_val:
+                                df_cur_ep.at[idx, "LastFileDateTime"] = None
+                                continue
+                            try:
+                                bkt, pref = S3Utils.parse_s3_path(s3_path_val)
+                            except ValueError:
+                                df_cur_ep.at[idx, "LastFileDateTime"] = None
+                                continue
+                            latest_obj = browser.find_latest_object(bkt, pref, start_utc=start_utc, end_utc=end_utc)
+                            if latest_obj and latest_obj.get("LastModified"):
+                                lt_syd = latest_obj["LastModified"].astimezone(SYDNEY_TZ)
+                                df_cur_ep.at[idx, "LastFileDateTime"] = lt_syd.strftime("%Y-%m-%d %H:%M:%S %Z")
+                            else:
+                                df_cur_ep.at[idx, "LastFileDateTime"] = None
+                        st.session_state[SK.QA_CURATED_ENTITY_PATHS_DF] = df_cur_ep
+                        st.write(f"✔️ Updated {len(_cur_iter)} of {len(df_cur_ep)} CURATED entities")
+                st.rerun()
+
+            # ── Raw file extension check ───────────────────────────────────────────
+            if btn_rawtypes:
+                df_raw_ep = st.session_state[SK.QA_RAW_ENTITY_PATHS_DF].copy()
+                _raw_sel = st.session_state.get("_ep_raw_sel_row", [])
+                _raw_iter = df_raw_ep.iloc[_raw_sel] if _raw_sel else df_raw_ep
+                if "ExtCheck" not in df_raw_ep.columns:
+                    df_raw_ep["ExtCheck"] = None
+                if "ExtDetail" not in df_raw_ep.columns:
+                    df_raw_ep["ExtDetail"] = None
+                with st.status("Running raw file extension check…", expanded=False):
+                    for idx, r in _raw_iter.iterrows():
+                        rb = (r.get("Bucket") or "").strip()
+                        ent = (r.get("Entity") or "").strip()
+                        if not rb or not ent:
+                            df_raw_ep.at[idx, "ExtCheck"] = "SKIP"
+                            df_raw_ep.at[idx, "ExtDetail"] = "Missing bucket or entity"
                             continue
 
-                        lb = (r.get("LandingBucket") or "").strip()
-                        rb = (r.get("RawBucket") or "").strip()
-                        cb = (r.get("CuratedBucket") or "").strip()
+                        if ent == "default":
+                            pref = "entity/default/"
+                            if versions_mode:
+                                items = browser.list_object_versions(
+                                    bucket=rb, prefix=pref, cap=cap_per_prefix,
+                                    start_utc=start_utc, end_utc=end_utc,
+                                    include_delete_markers=include_delete_markers
+                                )
+                                items = [it for it in items if not it.get("IsDeleteMarker")]
+                            else:
+                                items = browser.list_objects(bucket=rb, prefix=pref, cap=cap_per_prefix, start_utc=start_utc, end_utc=end_utc)
 
-                        lt = _latest_object_time_filtered(lb, "entity/" if lb else "", versions_mode, include_delete_markers, start_utc, end_utc, cap_per_prefix) if lb else None
-                        if not lt and lb:
-                            lt = _latest_object_time_filtered(lb, "", versions_mode, include_delete_markers, start_utc, end_utc, cap_per_prefix)
-
-                        rt = _latest_object_time_filtered(rb, "entity/" if rb else "", versions_mode, include_delete_markers, start_utc, end_utc, cap_per_prefix) if rb else None
-                        if not rt and rb:
-                            rt = _latest_object_time_filtered(rb, "", versions_mode, include_delete_markers, start_utc, end_utc, cap_per_prefix)
-
-                        ct = _latest_object_time_filtered(cb, "", versions_mode, include_delete_markers, start_utc, end_utc, cap_per_prefix) if cb else None
-                        if not ct and cb:
-                            ct = _latest_object_time_filtered(cb, "entity/", versions_mode, include_delete_markers, start_utc, end_utc, cap_per_prefix)
-
-                        land_times.append(lt.isoformat() if lt else None)
-                        raw_times.append(rt.isoformat() if rt else None)
-                        cur_times.append(ct.isoformat() if ct else None)
-
-                df["LandingLastFile"] = land_times
-                df["RawLastFile"] = raw_times
-                df["CuratedLastFile"] = cur_times
-                st.session_state[SK.QA_MAPPING_DF] = df
-                st.success("Timestamps added to the mapping table above.")
-
-        if btn_rawtypes:
-            if SK.QA_MAPPING_DF not in st.session_state:
-                st.warning("No mapping available.")
-            else:
-                df = st.session_state[SK.QA_MAPPING_DF]
-                sel = df[df["Select"] == True].copy()
-                if sel.empty:
-                    st.warning("Select at least one row in the mapping table.")
-                else:
-                    rows = []
-                    with st.status("Testing RAW types across last dates…", expanded=False):
-                        for _, r in sel.iterrows():
-                            app = r.get("EnterpriseAppID")
-                            rb = (r.get("RawBucket") or "").strip()
-                            if not rb:
-                                rows.append({"Test": f"Raw Types {RAW_LAST_N_DATES}", "AppID": app, "Entity": None, "Status": "SKIP", "Detail": "No raw bucket"})
-                                continue
-
-                            entities = _list_entities_under_raw(rb)
-                            for ent in entities:
-                                if ent == "default":
-                                    pref = "entity/default/"
+                            types_here = sorted({extract_file_extension(it.get("Key", "")) for it in items if it.get("Key")})
+                            ext_status = "PASS" if len(types_here) <= 1 else "WARN"
+                            ext_detail = f"default folder types: {types_here or ['(none)']}"
+                        else:
+                            base = f"entity/{ent}/"
+                            last_dates = _find_last_n_dates_with_data(
+                                rb, base, RAW_LAST_N_DATES, versions_mode, include_delete_markers, start_utc, end_utc, cap_per_prefix
+                            )
+                            if len(last_dates) < RAW_LAST_N_DATES:
+                                ext_status = "WARN"
+                                ext_detail = f"Found {len(last_dates)} date(s) in range: {last_dates}"
+                            else:
+                                types_per_date = []
+                                for d in last_dates:
+                                    pref = f"{base}{d}/"
                                     if versions_mode:
                                         items = browser.list_object_versions(
                                             bucket=rb, prefix=pref, cap=cap_per_prefix,
@@ -1017,123 +1119,91 @@ with tab_qa:
                                     else:
                                         items = browser.list_objects(bucket=rb, prefix=pref, cap=cap_per_prefix, start_utc=start_utc, end_utc=end_utc)
 
-                                    types_here = sorted({ extract_file_extension(it.get("Key","")) for it in items if it.get("Key") })
-                                    status = "PASS" if len(types_here) <= 1 else "WARN"
-                                    detail = f"default folder types: {types_here or ['(none)']}"
-                                    rows.append({"Test": f"Raw Types {RAW_LAST_N_DATES}", "AppID": app, "Entity": ent, "Status": status, "Detail": detail})
+                                    exts = sorted({extract_file_extension(it.get("Key", "")) for it in items if it.get("Key")})
+                                    types_per_date.append(exts)
+
+                                if types_per_date:
+                                    stable = len({",".join(x) for x in types_per_date}) == 1
+                                    ext_status = "PASS" if (stable and len(types_per_date[0]) == 1) else ("WARN" if stable else "FAIL")
+                                    ext_detail = f"Dates={last_dates}; Types={types_per_date}"
                                 else:
-                                    base = f"entity/{ent}/"
-                                    last_dates = _find_last_n_dates_with_data(
-                                        rb, base, RAW_LAST_N_DATES, versions_mode, include_delete_markers, start_utc, end_utc, cap_per_prefix
-                                    )
-                                    if len(last_dates) < RAW_LAST_N_DATES:
-                                        rows.append({"Test": f"Raw Types {RAW_LAST_N_DATES}", "AppID": app, "Entity": ent, "Status": "WARN",
-                                                     "Detail": f"Found {len(last_dates)} date(s) in range: {last_dates}"})
-                                        continue
+                                    ext_status = "WARN"
+                                    ext_detail = "No files found"
 
-                                    types_per_date = []
-                                    for d in last_dates:
-                                        pref = f"{base}{d}/"
-                                        if versions_mode:
-                                            items = browser.list_object_versions(
-                                                bucket=rb, prefix=pref, cap=cap_per_prefix,
-                                                start_utc=start_utc, end_utc=end_utc,
-                                                include_delete_markers=include_delete_markers
-                                            )
-                                            items = [it for it in items if not it.get("IsDeleteMarker")]
-                                        else:
-                                            items = browser.list_objects(bucket=rb, prefix=pref, cap=cap_per_prefix, start_utc=start_utc, end_utc=end_utc)
+                        df_raw_ep.at[idx, "ExtCheck"] = ext_status
+                        df_raw_ep.at[idx, "ExtDetail"] = ext_detail
 
-                                        exts = sorted({ extract_file_extension(it.get("Key","")) for it in items if it.get("Key") })
-                                        types_per_date.append(exts)
+                st.session_state[SK.QA_RAW_ENTITY_PATHS_DF] = df_raw_ep
+                st.rerun()
 
-                                    stable = len(set([",".join(x) for x in types_per_date])) == 1
-                                    status = "PASS" if stable and len(types_per_date[0]) == 1 else ("WARN" if stable else "FAIL")
-                                    detail = f"Dates={last_dates}; Types={types_per_date}"
-                                    rows.append({"Test": f"Raw Types {RAW_LAST_N_DATES}", "AppID": app, "Entity": ent, "Status": status, "Detail": detail})
+            # ── Test curated schema changes ────────────────────────────────────────
+            if btn_curatedschema:
+                df_cur_ep = st.session_state[SK.QA_CURATED_ENTITY_PATHS_DF].copy()
+                _cur_sel = st.session_state.get("_ep_cur_sel_row", [])
+                _cur_iter = df_cur_ep.iloc[_cur_sel] if _cur_sel else df_cur_ep
+                if "SchemaCheck" not in df_cur_ep.columns:
+                    df_cur_ep["SchemaCheck"] = None
+                if "SchemaDetail" not in df_cur_ep.columns:
+                    df_cur_ep["SchemaDetail"] = None
+                with st.status("Testing curated schema across last batches…", expanded=False):
+                    for idx, r in _cur_iter.iterrows():
+                        cb = (r.get("Bucket") or "").strip()
+                        ent = (r.get("Entity") or "").strip()
+                        if not cb or not ent:
+                            df_cur_ep.at[idx, "SchemaCheck"] = "SKIP"
+                            df_cur_ep.at[idx, "SchemaDetail"] = "Missing bucket or entity"
+                            continue
 
-                    prev = st.session_state.get(SK.QA_TESTS_DF)
-                    df_new = pd.DataFrame(rows)
-                    st.session_state[SK.QA_TESTS_DF] = pd.concat([prev, df_new], ignore_index=True) if isinstance(prev, pd.DataFrame) else df_new
-                    st.success("Raw types test complete.")
+                        batches = _find_last_n_batches_with_data(
+                            cb, ent, CURATED_LAST_N_BATCHES, versions_mode, include_delete_markers, start_utc, end_utc, cap_per_prefix
+                        )
+                        if not batches:
+                            df_cur_ep.at[idx, "SchemaCheck"] = "WARN"
+                            df_cur_ep.at[idx, "SchemaDetail"] = "No batches with data in range"
+                            continue
 
-        if btn_curatedschema:
-            if SK.QA_MAPPING_DF not in st.session_state:
-                st.warning("No mapping available.")
-            else:
-                df = st.session_state[SK.QA_MAPPING_DF]
-                sel = df[df["Select"] == True].copy()
-                if sel.empty:
-                    st.warning("Select at least one row in the mapping table.")
-                else:
-                    rows = []
-                    with st.status("Testing CURATED schema across last batches…", expanded=False):
-                        for _, r in sel.iterrows():
-                            app = r.get("EnterpriseAppID")
-                            cb = (r.get("CuratedBucket") or "").strip()
-                            if not cb:
-                                rows.append({"Test": f"Curated Schema {CURATED_LAST_N_BATCHES}", "AppID": app, "Entity": None, "Status": "SKIP", "Detail": "No curated bucket"})
+                        schemas = []
+                        sampled_info = []
+                        for b in batches:
+                            pref = f"{ent}/{b}/"
+                            row = _sample_row_in_prefix(cb, pref, versions_mode, include_delete_markers, start_utc, end_utc, cap_per_prefix)
+                            if not row:
+                                schemas.append(set())
+                                sampled_info.append(None)
                                 continue
 
-                            entities = _list_entities_under_curated(cb)
-                            for ent in entities:
-                                batches = _find_last_n_batches_with_data(
-                                    cb, ent, CURATED_LAST_N_BATCHES, versions_mode, include_delete_markers, start_utc, end_utc, cap_per_prefix
+                            key = row.get("Key")
+                            version_id = row.get("VersionId") if versions_mode else None
+                            ftype = QAInspector.guess_type(key)
+                            try:
+                                cols = qa.list_columns(
+                                    bucket=cb, key=key, ftype=ftype,
+                                    version_id=version_id if version_id else None
                                 )
-                                if not batches:
-                                    rows.append({"Test": f"Curated Schema {CURATED_LAST_N_BATCHES}", "AppID": app, "Entity": ent, "Status": "WARN",
-                                                 "Detail": "No batches with data in range"})
-                                    continue
+                                schemas.append(set(cols or []))
+                                sampled_info.append(f"{key}{f' (v={version_id})' if version_id else ''}")
+                            except Exception as e:
+                                schemas.append(set())
+                                sampled_info.append(f"{key} (err: {e})")
 
-                                schemas = []
-                                sampled_info = []
-                                for b in batches:
-                                    pref = f"{ent}/{b}/"
-                                    row = _sample_row_in_prefix(cb, pref, versions_mode, include_delete_markers, start_utc, end_utc, cap_per_prefix)
-                                    if not row:
-                                        schemas.append(set())
-                                        sampled_info.append(None)
-                                        continue
+                        base_schema = schemas[0] if schemas else set()
+                        changed = any(s != base_schema for s in schemas[1:])
 
-                                    key = row.get("Key")
-                                    version_id = row.get("VersionId") if versions_mode else None
-                                    ftype = QAInspector.guess_type(key)
-                                    try:
-                                        cols = qa.list_columns(
-                                            bucket=cb, key=key, ftype=ftype,
-                                            version_id=version_id if version_id else None
-                                        )
-                                        schemas.append(set(cols or []))
-                                        sampled_info.append(f"{key}{' (v='+version_id+')' if version_id else ''}")
-                                    except Exception as e:
-                                        schemas.append(set())
-                                        sampled_info.append(f"{key} (err: {e})")
+                        if changed:
+                            union_all = set().union(*schemas) if schemas else set()
+                            added_columns = sorted(union_all - base_schema)
+                            removed_columns = sorted(base_schema - union_all)
+                            schema_detail = f"Batches={batches}; Sampled={sampled_info}; Changes → added={added_columns}, removed={removed_columns}"
+                            schema_status = "FAIL"
+                        else:
+                            schema_detail = f"Batches={batches}; Sampled={sampled_info}; No column changes"
+                            schema_status = "PASS"
 
-                                base = schemas[0] if schemas else set()
-                                changed = any(s != base for s in schemas[1:])
+                        df_cur_ep.at[idx, "SchemaCheck"] = schema_status
+                        df_cur_ep.at[idx, "SchemaDetail"] = schema_detail
 
-                                if changed:
-                                    union_all = set().union(*schemas) if schemas else set()
-                                    added = sorted(list(union_all - base))
-                                    removed = sorted(list(base - union_all))
-                                    detail = f"Batches={batches}; Sampled={sampled_info}; Changes → added={added}, removed={removed}"
-                                    status = "FAIL"
-                                else:
-                                    detail = f"Batches={batches}; Sampled={sampled_info}; No column changes"
-                                    status = "PASS"
-
-                                rows.append({"Test": f"Curated Schema {CURATED_LAST_N_BATCHES}", "AppID": app, "Entity": ent, "Status": status, "Detail": detail})
-
-                    prev = st.session_state.get(SK.QA_TESTS_DF)
-                    df_new = pd.DataFrame(rows)
-                    st.session_state[SK.QA_TESTS_DF] = pd.concat([prev, df_new], ignore_index=True) if isinstance(prev, pd.DataFrame) else df_new
-                    st.success("Curated schema test complete.")
-
-        st.markdown("#### 🧾 Tests Summary")
-        if SK.QA_TESTS_DF in st.session_state:
-            st.dataframe(st.session_state[SK.QA_TESTS_DF], use_container_width=True, hide_index=True)
-        else:
-            st.info("No tests run yet.")
+                st.session_state[SK.QA_CURATED_ENTITY_PATHS_DF] = df_cur_ep
+                st.rerun()
 
     with tab_manual:
         st.markdown("#### S3 Dataset / File")
@@ -1142,7 +1212,7 @@ with tab_qa:
         s3_path = st.text_input(
             "S3 path (file OR folder)",
             value=st.session_state.get(SK.QA_S3_PATH, st.session_state.get(SK.S3_PATH, "")),
-            key="flow_qa_manual_s3_path",
+            key=SK.QA_MANUAL_S3_PATH_WIDGET,
             placeholder="e.g., s3://bucket/folder/ or s3://bucket/file.parquet"
         )
         st.session_state[SK.QA_S3_PATH] = s3_path
