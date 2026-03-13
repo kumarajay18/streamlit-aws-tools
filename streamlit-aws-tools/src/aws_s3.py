@@ -2,31 +2,24 @@
 
 from __future__ import annotations
 
-import os
-import io
-import json
-import gzip
 import shutil
 import subprocess
-from pathlib import Path
-from typing import Optional, Tuple, Dict
+from typing import Optional, Dict
 
 import boto3
-import duckdb  # currently unused, but kept as requested for future ETL work
-import pandas as pd  # currently unused
-import pyarrow.parquet as pq  # currently unused
 import awswrangler as wr
 from botocore.config import Config
-import xml.etree.ElementTree as ET  # currently unused
 
+from src.config import DEFAULT_REGION, DEFAULT_EXPORT_NAME, SUPPORTED_PROFILES
+from src.core.exceptions import SessionNotReadyError, SSOLoginError, InvalidProfileError
 
-DEFAULT_REGION = os.getenv("AWS_DEFAULT_REGION", "ap-southeast-2")
-DEFAULT_EXPORT_NAME = "S3CustomEndpoint"
-
-SUPPORTED_PROFILES = [
-    "a1226-nonprod",
-    "a1226-dev",
-    "a1226-prod",
+# Re-export for backward compatibility with modules that import these from aws_s3
+__all__ = [
+    "S3SessionManager",
+    "get_manager",
+    "DEFAULT_REGION",
+    "DEFAULT_EXPORT_NAME",
+    "SUPPORTED_PROFILES",
 ]
 
 
@@ -55,15 +48,32 @@ class S3SessionManager:
         region: Optional[str] = None,
         export_name: Optional[str] = None,
         run_sso: bool = True,
+        s3_endpoint_url_override: Optional[str] = None,
     ) -> Dict:
         """
         Perform AWS SSO login (via CLI), create boto3 Session, fetch S3 custom endpoint (CloudFormation Export),
         configure awswrangler, and validate identity.
 
-        Returns a dict with context info to display in UI.
+        Args:
+            profile: AWS CLI profile name (must exist in ~/.aws/config).
+            region: AWS region (falls back to default_region).
+            export_name: CloudFormation export name to resolve a custom S3 endpoint URL.
+            run_sso: When True, invoke ``aws sso login`` in a subprocess (opens a browser window).
+            s3_endpoint_url_override: Explicit S3 endpoint URL; if provided, skips the CloudFormation
+                export lookup entirely.
+
+        Returns:
+            A dict with context info: ok, profile, region, s3_endpoint_url, identity.
         """
         region = region or self.default_region
         export_name = export_name or self.export_name
+
+        if not profile or profile not in SUPPORTED_PROFILES:
+            raise InvalidProfileError(
+                f"Profile '{profile}' is not in SUPPORTED_PROFILES: {SUPPORTED_PROFILES}"
+            )
+        if not region:
+            raise ValueError("AWS region must not be empty.")
 
         # 1) Optionally trigger SSO login (opens your default browser)
         if run_sso:
@@ -74,12 +84,22 @@ class S3SessionManager:
         self._active_profile = profile
         self._region = region
 
-        # 3) Resolve optional custom endpoint from CloudFormation Export
-        self._s3_endpoint_url = self._get_s3_endpoint_export(self._boto3_session, export_name)
+        # 3) Resolve optional custom endpoint:
+        #    - Use explicit override first, then fall back to CloudFormation export lookup.
+        if s3_endpoint_url_override:
+            self._s3_endpoint_url = s3_endpoint_url_override
+        else:
+            self._s3_endpoint_url = self._get_s3_endpoint_export(self._boto3_session, export_name)
 
-        # 4) Apply endpoint to awswrangler config (if present)
+        # 4) Apply endpoint to awswrangler config (session-level, not process-global where avoidable).
+        #    Note: awswrangler reads wr.config.s3_endpoint_url at call time, so updating it here
+        #    affects all subsequent wr.s3.* calls in this process. This is acceptable for a
+        #    single-profile Streamlit app; if you need multi-endpoint support, pass
+        #    boto3_session with endpoint configured instead.
         if self._s3_endpoint_url:
             wr.config.s3_endpoint_url = self._s3_endpoint_url  # type: ignore[attr-defined]
+        else:
+            wr.config.s3_endpoint_url = None  # type: ignore[attr-defined]
 
         # 5) Validate credentials and capture identity
         self._identity = self._get_identity(self._boto3_session)
@@ -97,7 +117,9 @@ class S3SessionManager:
 
     def get_session(self) -> boto3.Session:
         if not self._boto3_session:
-            raise RuntimeError("No active boto3 Session. Run login first on the homepage.")
+            raise SessionNotReadyError(
+                "No active boto3 Session. Go to the Home page and log in first."
+            )
         return self._boto3_session
 
     def get_s3_client(self):
@@ -141,10 +163,9 @@ class S3SessionManager:
         Calls 'aws sso login --profile <profile>'.
         This will open a browser window on the machine running Streamlit.
         """
-        # Locate AWS CLI
         aws_exe = shutil.which("aws") or shutil.which("aws.exe") or shutil.which("aws.cmd")
         if not aws_exe:
-            raise RuntimeError(
+            raise SSOLoginError(
                 "AWS CLI not found. Please install & configure AWS CLI v2 and retry.\n"
                 "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
             )
@@ -154,11 +175,16 @@ class S3SessionManager:
                 [aws_exe, "sso", "login", "--profile", profile],
                 check=True,
                 capture_output=False,
+                timeout=300,  # 5-minute timeout; SSO login requires a browser interaction
             )
+        except subprocess.TimeoutExpired as e:
+            raise SSOLoginError(
+                f"AWS SSO login timed out for profile '{profile}'. "
+                "Complete the browser authentication within 5 minutes."
+            ) from e
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(
-                f"AWS SSO login failed for profile '{profile}'.\n"
-                f"Exit code: {e.returncode}"
+            raise SSOLoginError(
+                f"AWS SSO login failed for profile '{profile}'. Exit code: {e.returncode}"
             ) from e
 
     def _get_s3_endpoint_export(self, session: boto3.Session, export_name: str) -> Optional[str]:

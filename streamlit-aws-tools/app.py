@@ -6,6 +6,7 @@ from datetime import datetime, timezone, timedelta
 
 import streamlit as st
 from src.aws_s3 import get_manager, SUPPORTED_PROFILES, DEFAULT_REGION, DEFAULT_EXPORT_NAME
+from src.config import SK
 
 # -----------------------------------------------------------------------------
 # Page Setup
@@ -97,9 +98,9 @@ with st.sidebar:
                 st.write(f"**S3 Endpoint**: {ctx['s3_endpoint_url'] or '(standard)'}")
 
                 # Persist session
-                st.session_state["aws_profile"] = profile
-                st.session_state["aws_region"] = region
-                st.session_state["s3_endpoint_url"] = ctx["s3_endpoint_url"]
+                st.session_state[SK.AWS_PROFILE] = profile
+                st.session_state[SK.AWS_REGION] = region
+                st.session_state[SK.S3_ENDPOINT_URL] = ctx["s3_endpoint_url"]
 
                 status.update(label="Login Complete", state="complete", expanded=False)
         except Exception as e:
@@ -121,9 +122,9 @@ with st.sidebar:
                 st.write(f"**ARN**: {ctx['identity']['Arn']}")
                 st.write(f"**S3 Endpoint**: {ctx['s3_endpoint_url'] or '(standard)'}")
 
-                st.session_state["aws_profile"] = profile
-                st.session_state["aws_region"] = region
-                st.session_state["s3_endpoint_url"] = ctx["s3_endpoint_url"]
+                st.session_state[SK.AWS_PROFILE] = profile
+                st.session_state[SK.AWS_REGION] = region
+                st.session_state[SK.S3_ENDPOINT_URL] = ctx["s3_endpoint_url"]
 
                 status.update(label="Session Ready", state="complete", expanded=False)
         except Exception as e:

@@ -10,12 +10,13 @@ from typing import Optional, Dict, Any
 import streamlit as st
 from botocore.exceptions import ClientError
 
-from src.aws_s3 import get_manager  # we just reuse the manager for boto3 session
+from src.aws_s3 import get_manager
+from src.ui.guards import require_aws_session
+from src.ui.context import show_session_caption
 
 st.set_page_config(page_title="SQS — Send Message", page_icon="📬", layout="wide")
 st.title("📬 SQS — Send Message")
 
-# (Optional) Small shared header with logo
 try:
     c1, c2 = st.columns([0.12, 0.88])
     with c1:
@@ -33,15 +34,9 @@ except Exception:
 # -----------------------------
 # Require an active session
 # -----------------------------
-mgr = get_manager()
-if not mgr.has_active_session():
-    st.warning("No active AWS session. Go to the home page and click **Login with AWS SSO** (or Reuse Existing).")
-    st.stop()
-
-ctx = mgr.current_context()
-st.caption(
-    f"Using profile **{ctx.get('profile')}**, region **{ctx.get('region')}**. "
-    f"S3 endpoint (unrelated to SQS): **{ctx.get('s3_endpoint_url') or 'standard'}**"
+mgr = require_aws_session()
+ctx = show_session_caption(
+    extra_note="(S3 endpoint shown for reference; not used by SQS)"
 )
 
 # -----------------------------

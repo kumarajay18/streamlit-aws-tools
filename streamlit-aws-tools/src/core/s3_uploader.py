@@ -8,13 +8,18 @@ from typing import Iterable, Tuple, Optional
 from botocore.exceptions import ClientError
 from boto3.s3.transfer import TransferConfig
 
+from src.config import EXTRA_MIME_TYPES
+
 
 class S3Uploader:
+    """Uploads local files or entire directory trees to S3."""
+
     def __init__(self, boto3_client):
         self.s3 = boto3_client
 
     @staticmethod
     def iter_local_files(root: Path) -> Iterable[Path]:
+        """Yield every file under *root* (or *root* itself if it is a file)."""
         if root.is_file():
             yield root
         elif root.is_dir():
@@ -26,6 +31,12 @@ class S3Uploader:
 
     @staticmethod
     def relative_key(local_root: Path, file_path: Path, dest_prefix: str, preserve_structure: bool) -> str:
+        """
+        Build the S3 object key for *file_path*.
+
+        If *preserve_structure* is True, the path relative to *local_root* is appended
+        to *dest_prefix*; otherwise only the filename is used.
+        """
         prefix = dest_prefix.strip()
         if prefix and not prefix.endswith("/"):
             prefix += "/"
@@ -33,32 +44,52 @@ class S3Uploader:
             rel = file_path.relative_to(local_root)
             rel_str = str(rel).replace("\\", "/")
             return f"{prefix}{rel_str}" if prefix else rel_str
-        else:
-            name = file_path.name
-            return f"{prefix}{name}" if prefix else name
+        name = file_path.name
+        return f"{prefix}{name}" if prefix else name
 
     @staticmethod
     def guess_content_type(file_path: Path) -> Optional[str]:
+        """
+        Guess the MIME type for *file_path*.
+
+        Falls back to a built-in extension map (``EXTRA_MIME_TYPES``) for formats
+        the stdlib ``mimetypes`` module does not know about (e.g. ``.parquet``, ``.jsonl``).
+        """
+        suffix = file_path.suffix.lower()
+        if suffix in EXTRA_MIME_TYPES:
+            return EXTRA_MIME_TYPES[suffix]
         ctype, _ = mimetypes.guess_type(str(file_path))
         return ctype
 
     def object_exists(self, bucket: str, key: str) -> bool:
+        """Return True if the object already exists in S3 (uses HeadObject)."""
         try:
             self.s3.head_object(Bucket=bucket, Key=key)
             return True
         except ClientError:
             return False
 
-    def upload_one(self,
-                   bucket: str,
-                   key: str,
-                   file_path: Path,
-                   content_type: Optional[str],
-                   overwrite: bool,
-                   transfer_cfg: TransferConfig,
-                   sse: Optional[str] = None,
-                   kms_key_id: Optional[str] = None) -> Tuple[bool, Optional[str]]:
-        extra_args = {}
+    def upload_one(
+        self,
+        bucket: str,
+        key: str,
+        file_path: Path,
+        content_type: Optional[str],
+        overwrite: bool,
+        transfer_cfg: TransferConfig,
+        sse: Optional[str] = None,
+        kms_key_id: Optional[str] = None,
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Upload a single file to S3.
+
+        Returns:
+            ``(True, None)`` on success, ``(False, error_message)`` on failure or skip.
+        """
+        if not file_path.is_file():
+            return False, f"Local file not found: {file_path}"
+
+        extra_args: dict = {}
         if content_type:
             extra_args["ContentType"] = content_type
         if sse == "AES256":
@@ -70,23 +101,27 @@ class S3Uploader:
 
         if not overwrite and self.object_exists(bucket, key):
             return False, "Skipped (exists and overwrite disabled)"
+
         try:
             self.s3.upload_file(
                 Filename=str(file_path),
                 Bucket=bucket,
                 Key=key,
-                ExtraArgs=extra_args if extra_args else None,
+                ExtraArgs=extra_args or None,
                 Config=transfer_cfg,
             )
             return True, None
+        except ClientError as e:
+            return False, f"AWS error: {e.response['Error']['Code']} — {e.response['Error']['Message']}"
         except Exception as e:
             return False, str(e)
 
     @staticmethod
     def fmt_size(nbytes: int) -> str:
+        """Return a human-readable file size string (e.g. ``"12.3 MB"``)."""
         units = ["B", "KB", "MB", "GB", "TB"]
         size = float(nbytes)
-        for i, u in enumerate(units):
+        for u in units:
             if size < 1024.0 or u == "TB":
                 return f"{int(size)} B" if u == "B" else f"{size:.1f} {u}"
             size /= 1024.0

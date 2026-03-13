@@ -8,6 +8,7 @@ from typing import Optional, Dict
 
 import streamlit as st
 
+from src.config import SK
 from src.aws_s3 import (
     get_manager,
     SUPPORTED_PROFILES,
@@ -163,9 +164,9 @@ def _nav_component():
 def _session_controls(mgr) -> Dict:
     """Right side: login/profile/region controls + session summary."""
     ctx = mgr.current_context() if mgr.has_active_session() else {}
-    current_profile = ctx.get("profile") if ctx else st.session_state.get("aws_profile")
-    current_region = ctx.get("region") if ctx else st.session_state.get("aws_region", DEFAULT_REGION)
-    current_endpoint = ctx.get("s3_endpoint_url") if ctx else st.session_state.get("s3_endpoint_url", "")
+    current_profile = ctx.get("profile") if ctx else st.session_state.get(SK.AWS_PROFILE)
+    current_region = ctx.get("region") if ctx else st.session_state.get(SK.AWS_REGION, DEFAULT_REGION)
+    current_endpoint = ctx.get("s3_endpoint_url") if ctx else st.session_state.get(SK.S3_ENDPOINT_URL, "")
 
     # Controls in two rows
     # Row 1: Profile/Region + Basic actions
@@ -180,9 +181,9 @@ def _session_controls(mgr) -> Dict:
         if st.button("♻️ Reuse", width='stretch'):
             try:
                 res = mgr.login_and_setup(profile=profile, region=region, export_name=DEFAULT_EXPORT_NAME, run_sso=False)
-                st.session_state["aws_profile"] = profile
-                st.session_state["aws_region"] = region
-                st.session_state["s3_endpoint_url"] = res.get("s3_endpoint_url")
+                st.session_state[SK.AWS_PROFILE] = profile
+                st.session_state[SK.AWS_REGION] = region
+                st.session_state[SK.S3_ENDPOINT_URL] = res.get("s3_endpoint_url")
                 st.success("Reused existing session.")
             except Exception as e:
                 st.warning(f"Reuse failed: {e}")
@@ -191,9 +192,9 @@ def _session_controls(mgr) -> Dict:
         if st.button("🔓 Login", type="primary", width='stretch'):
             try:
                 res = mgr.login_and_setup(profile=profile, region=region, export_name=DEFAULT_EXPORT_NAME, run_sso=True)
-                st.session_state["aws_profile"] = profile
-                st.session_state["aws_region"] = region
-                st.session_state["s3_endpoint_url"] = res.get("s3_endpoint_url")
+                st.session_state[SK.AWS_PROFILE] = profile
+                st.session_state[SK.AWS_REGION] = region
+                st.session_state[SK.S3_ENDPOINT_URL] = res.get("s3_endpoint_url")
                 st.success("Login successful.")
             except Exception as e:
                 st.error(f"Login failed: {e}")
@@ -202,19 +203,19 @@ def _session_controls(mgr) -> Dict:
     d1, d2, d3 = st.columns([1.2, 0.8, 2.0])
     with d1:
         with st.expander("Advanced (Endpoint)", expanded=False):
-            override = st.text_input("S3 Endpoint override (optional)", value=st.session_state.get("s3_endpoint_override", "")).strip()
+            override = st.text_input("S3 Endpoint override (optional)", value=st.session_state.get(SK.S3_ENDPOINT_OVERRIDE, "")).strip()
             if st.button("Apply Override", width='stretch'):
                 try:
                     # Store override and re-init without forcing browser
-                    st.session_state["s3_endpoint_override"] = override
+                    st.session_state[SK.S3_ENDPOINT_OVERRIDE] = override
                     res = mgr.login_and_setup(
                         profile=st.session_state.get("aws_profile", profile),
-                        region=st.session_state.get("aws_region", region),
+                        region=st.session_state.get(SK.AWS_REGION, region),
                         export_name=DEFAULT_EXPORT_NAME,
                         run_sso=False,
                         s3_endpoint_url_override=(override or None),
                     )
-                    st.session_state["s3_endpoint_url"] = res.get("s3_endpoint_url")
+                    st.session_state[SK.S3_ENDPOINT_URL] = res.get("s3_endpoint_url")
                     st.success("Endpoint applied.")
                 except Exception as e:
                     st.error(f"Failed to apply endpoint: {e}")
@@ -223,12 +224,12 @@ def _session_controls(mgr) -> Dict:
             try:
                 res = mgr.login_and_setup(
                     profile=st.session_state.get("aws_profile", profile),
-                    region=st.session_state.get("aws_region", region),
+                    region=st.session_state.get(SK.AWS_REGION, region),
                     export_name=DEFAULT_EXPORT_NAME,
                     run_sso=True,
-                    s3_endpoint_url_override=st.session_state.get("s3_endpoint_override", None) or None,
+                    s3_endpoint_url_override=st.session_state.get(SK.S3_ENDPOINT_OVERRIDE, None) or None,
                 )
-                st.session_state["s3_endpoint_url"] = res.get("s3_endpoint_url")
+                st.session_state[SK.S3_ENDPOINT_URL] = res.get("s3_endpoint_url")
                 st.success("Re-login successful.")
             except Exception as e:
                 st.error(f"Re-login failed: {e}")
