@@ -150,7 +150,7 @@ with c1:
     env_label = st.selectbox("Environment / Host", options=list(JDBC_OPTIONS.keys()), index=0)
     jdbc_selected = JDBC_OPTIONS[env_label]
 with c2:
-    user = st.text_input("Username (LDAP)", value=st.session_state.get("td_user", ""), placeholder="e.g., ajay.kumar")
+    user = st.text_input("Username (LDAP)", key="td_user", placeholder="e.g., ajay.kumar")
 with c3:
     password = st.text_input("Password", value="", type="password", placeholder="Enter LDAP password")
 with c4:
@@ -211,7 +211,6 @@ if connect_btn:
 
             st.session_state["td_conn"] = conn
             st.session_state["td_ctx_db"] = parsed.get("database")
-            st.session_state["td_user"] = user
             st.success(f"Connected to {parsed['host']} as {user}.")
             st.dataframe(df_ts, width='stretch')
         except Exception as e:
@@ -235,7 +234,11 @@ if "td_conn" in st.session_state:
     with tabs[0]:
         st.markdown("##### Run SQL")
         default_sql = "SELECT TOP 10 * FROM DBC.DatabasesV;"
-        sql = st.text_area("SQL", value=st.session_state.get("td_last_sql", default_sql), height=200, placeholder="Write your SQL here...")
+        # Seed the editor key with the last executed SQL so the user's query
+        # persists across reruns; falls back to default_sql on first visit.
+        if "td_sql_editor" not in st.session_state:
+            st.session_state["td_sql_editor"] = st.session_state.get("td_last_sql", default_sql)
+        sql = st.text_area("SQL", key="td_sql_editor", height=200, placeholder="Write your SQL here...")
         limit_rows = st.number_input("Row cap (client-side)", min_value=1, max_value=100000, value=5000, step=100)
         c_run1, c_run2 = st.columns([1, 1])
         with c_run1:
