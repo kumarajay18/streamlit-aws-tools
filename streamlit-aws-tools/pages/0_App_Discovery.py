@@ -359,12 +359,13 @@ st.subheader("📚 Enterprise Apps (from latest artefact template)")
 i1, i2 = st.columns([2, 2], vertical_alignment="bottom")
 
 with i1:
+    if "ad_branch_prefs" not in st.session_state:
+        st.session_state["ad_branch_prefs"] = "master, main, develop"
     branch_pref_raw = st.text_input(
         "Preferred branches (left→right priority)",
-        value=st.session_state.get("ad_branch_prefs", "master, main, develop"),
+        key="ad_branch_prefs",
         help="Resolver picks the first available branch from this list."
     )
-    st.session_state["ad_branch_prefs"] = branch_pref_raw
     branch_prefs = [b.strip() for b in branch_pref_raw.split(",") if b.strip()]
 
 with i2:

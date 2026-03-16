@@ -10,9 +10,16 @@ import splunklib.client as splunk_client
 
 
 # --------------------------------
-# ENV
+# ENV — load once per server process, not on every script rerun
 # --------------------------------
-load_dotenv()
+@st.cache_resource
+def _load_env() -> None:
+    """Load .env variables exactly once; avoids re-reading the file on every
+    Streamlit rerun, which could trigger Streamlit's file-watcher and show a
+    spurious 'Source file changed' notification."""
+    load_dotenv()
+
+_load_env()
 
 SPLUNK_HOST = os.getenv("SPLUNK_HOST")
 SPLUNK_PORT = int(os.getenv("SPLUNK_PORT", "8089"))

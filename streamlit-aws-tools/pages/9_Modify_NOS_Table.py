@@ -21,18 +21,17 @@ st.set_page_config(page_title="Modify NOS Table", page_icon="🛠️", layout="w
 # -----------------------------
 mgr = require_aws_session()
 
-region = st.session_state.get(SK.NOS_REGION, DEFAULT_REGION)
-pipeline_id = st.session_state.get(SK.NOS_PIPELINE_ID, "")
-
 st.title("🛠️ Modify NOS Table")
 
 with st.sidebar:
     st.header("Context")
-    pipeline_id = st.text_input("PipelineId", value=pipeline_id, help="From Lambda env PIPELINE_ID")
-    st.session_state[SK.NOS_PIPELINE_ID] = pipeline_id
+    if SK.NOS_PIPELINE_ID not in st.session_state:
+        st.session_state[SK.NOS_PIPELINE_ID] = ""
+    pipeline_id = st.text_input("PipelineId", key=SK.NOS_PIPELINE_ID, help="From Lambda env PIPELINE_ID")
 
-    region = st.text_input("Region", value=region)
-    st.session_state[SK.NOS_REGION] = region
+    if SK.NOS_REGION not in st.session_state:
+        st.session_state[SK.NOS_REGION] = DEFAULT_REGION
+    region = st.text_input("Region", key=SK.NOS_REGION)
 
 # -----------------------------
 # Helpers

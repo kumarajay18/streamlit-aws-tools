@@ -92,17 +92,14 @@ def normalize_message_attributes(attrs: list[dict]) -> Dict[str, Dict[str, str]]
 # -----------------------------
 with st.sidebar:
     st.header("Queue")
-    default_queue = st.session_state.get(
-        "sqs_queue_url",
-        "https://sqs.ap-southeast-2.amazonaws.com/526424598388/LakeFoundations-TeradataNosIntegration-13WOD1AH9HI-NosJobQueue-sa910slzcF8I.fifo"
-    )
+    if "sqs_queue_url" not in st.session_state:
+        st.session_state["sqs_queue_url"] = "https://sqs.ap-southeast-2.amazonaws.com/526424598388/LakeFoundations-TeradataNosIntegration-13WOD1AH9HI-NosJobQueue-sa910slzcF8I.fifo"
     queue_url = st.text_input(
         "Queue URL",
-        value=default_queue,
+        key="sqs_queue_url",
         placeholder="https://sqs.<region>.amazonaws.com/<account>/<queue-name>",
         help="Provide the full SQS Queue URL"
     )
-    st.session_state["sqs_queue_url"] = queue_url
 
     check_btn = st.button("🔎 Check Queue & Attributes", width='stretch')
 
@@ -148,9 +145,9 @@ default_body = {
 }
 
 if show_raw:
-    raw_default = st.session_state.get("sqs_raw_body", json.dumps(default_body, indent=2))
-    raw_json = st.text_area("Raw JSON", value=raw_default, height=220, placeholder="{ ... }")
-    st.session_state["sqs_raw_body"] = raw_json
+    if "sqs_raw_body" not in st.session_state:
+        st.session_state["sqs_raw_body"] = json.dumps(default_body, indent=2)
+    raw_json = st.text_area("Raw JSON", key="sqs_raw_body", height=220, placeholder="{ ... }")
     body_form_obj: Optional[dict] = None
 else:
     # Form mode

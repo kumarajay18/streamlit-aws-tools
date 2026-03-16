@@ -32,19 +32,23 @@ uploader = S3Uploader(s3)
 with st.sidebar:
     st.header("Local → S3 Upload")
 
+    if SK.UL_LOCAL_ROOT not in st.session_state:
+        st.session_state[SK.UL_LOCAL_ROOT] = str((Path.cwd() / "to_upload").resolve())
     local_root_str = st.text_input(
         "Local path (file or folder)",
-        value=st.session_state.get(SK.UL_LOCAL_ROOT, str((Path.cwd() / "to_upload").resolve())),
+        key=SK.UL_LOCAL_ROOT,
         placeholder="e.g., C:\\data\\export or /Users/you/data/export or C:\\file.csv"
     )
-    st.session_state[SK.UL_LOCAL_ROOT] = local_root_str
 
+    if SK.UL_DEST_PATH not in st.session_state:
+        # Pre-fill from the shared S3 path set by other pages (e.g. Analyse S3),
+        # so navigating to this page with a path in context feels seamless.
+        st.session_state[SK.UL_DEST_PATH] = st.session_state.get(SK.S3_PATH, "")
     s3_dest_path = st.text_input(
         "Destination S3 path",
-        value=st.session_state.get(SK.UL_DEST_PATH, st.session_state.get(SK.S3_PATH, "")),
+        key=SK.UL_DEST_PATH,
         placeholder="e.g., s3://my-bucket/upload-root/  or  my-bucket/folder"
     )
-    st.session_state[SK.UL_DEST_PATH] = s3_dest_path
 
     preserve_structure = st.checkbox(
         "Preserve folder structure (relative to the local path)",

@@ -168,7 +168,7 @@ with c1:
     env_label = st.selectbox("Environment / Host", options=list(JDBC_OPTIONS.keys()), index=0)
     jdbc_selected = JDBC_OPTIONS[env_label]
 with c2:
-    user = st.text_input("Username (LDAP)", value=st.session_state.get("td_user", ""), placeholder="e.g., ajay.kumar")
+    user = st.text_input("Username (LDAP)", key="td_user", placeholder="e.g., ajay.kumar")
 with c3:
     password = st.text_input("Password", value="", type="password", placeholder="Enter LDAP password")
 with c4:
@@ -222,7 +222,6 @@ if connect_btn:
 
             st.session_state["td_conn"] = conn
             st.session_state["td_ctx_db"] = parsed.get("database")
-            st.session_state["td_user"] = user
             st.success(f"Connected to {parsed['host']} as {user}.")
             st.dataframe(df_ts, use_container_width=True)
         except Exception as e:
